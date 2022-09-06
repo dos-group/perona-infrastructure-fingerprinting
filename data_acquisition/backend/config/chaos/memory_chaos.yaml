@@ -1,0 +1,12 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: memory-chaos
+spec:
+  mode: all
+  stressors:
+    memory:
+      workers: 2
+      size: 50%
+      time: 30s
+  duration: 30s

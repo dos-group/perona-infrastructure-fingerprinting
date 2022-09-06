@@ -1,0 +1,33 @@
+---
+- name: Delete instance
+  gcp_compute_instance:
+    name: "{{ item.hostname }}"
+    state: absent
+    machine_type: "{{ item.machine_type }}"
+    project: "{{ gcp_project }}"
+    zone: "{{ gcp_zone }}"
+    auth_kind: "{{ gcp_cred_kind }}"
+    service_account_file: "{{ gcp_cred_file }}"
+    disks:
+      - auto_delete: true
+        boot: true
+        initialize_params:
+          disk_size_gb: 20
+          source_image: "{{ gcp_image }}"
+    scopes:
+      - https://www.googleapis.com/auth/compute
+  tags:
+    - delete
+
+- name: Delete an IP address
+  gcp_compute_address:
+    name: "{{ item.hostname }}-ip"
+    region: "{{ gcp_region }}"
+    project: "{{ gcp_project }}"
+    auth_kind: "{{ gcp_cred_kind }}"
+    service_account_file: "{{ gcp_cred_file }}"
+    scopes:
+      - https://www.googleapis.com/auth/compute
+    state: absent
+  tags:
+    - delete

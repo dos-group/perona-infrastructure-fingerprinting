@@ -1,0 +1,188 @@
+---
+- name: Run the experiment and gather results
+  hosts: localhost
+  become: false
+  vars:
+    date_suffix_for_files: "{{ ansible_date_time['iso8601'] }}"
+  tasks:
+    - name: Create directory for results
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/results"
+        state: directory
+      tags:
+        - inject
+        - gather
+
+    - name: Set facts (GCP)
+      ansible.builtin.set_fact:
+        api_url: http://{{ hostvars['k3s-master']['ansible_host'] }}:31313
+      when: execution_environment == 'gcp'
+      tags:
+        - execute
+
+    - name: Set facts (AWS)
+      ansible.builtin.set_fact:
+        api_url: http://{{ hostvars[groups['k3s_master'][0]]['ansible_host'] }}:31313
+      when: execution_environment == 'aws'
+      tags:
+        - execute
+
+    - name: Set facts (Kind)
+      ansible.builtin.set_fact:
+        api_url: http://localhost:8000
+      when: execution_environment == 'kind'
+      tags:
+        - execute
+
+    - name: Get perona-operator pod name
+      kubernetes.core.k8s_info:
+        kind: Pod
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        label_selectors:
+          - app=perona-operator
+        namespace: default
+      register: perona_operator_pod
+      tags:
+        - inject
+        - gather
+    
+    - name: "Inject --> copy file and use easy name"
+      ansible.builtin.command:
+        cmd: "cp {{ persistent_db_file  }} ./results/to_pod.sqlite"
+      when: persistent_db_file != None
+      tags:
+        - inject
+
+    - name: "Inject --> transfer prepared db file into pod container"
+      ansible.builtin.command:
+        cmd: "kubectl cp ./results/to_pod.sqlite default/{{ perona_operator_pod.resources[0].metadata.name }}:/tmp/db-in-progress.sqlite -c copy --kubeconfig {{ playbook_dir }}/fetched/config"
+      when: persistent_db_file != None
+      tags:
+        - inject
+    
+    - name: "Inject --> rename transferred file"
+      ansible.builtin.command:
+        cmd: "kubectl exec -it pod/{{ perona_operator_pod.resources[0].metadata.name }} -n default --kubeconfig {{ playbook_dir }}/fetched/config -c copy -- mv /tmp/db-in-progress.sqlite /tmp/db.sqlite"
+      when: persistent_db_file != None
+      tags:
+        - inject
+   
+    - name: Wait until actual perona-operator container is up
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        api_version: v1
+        kind: Pod
+        namespace: default
+        name: "{{ perona_operator_pod.resources[0].metadata.name }}"
+      register: pod_list
+      until: pod_list|json_query('resources[*].status.phase')|unique == ["Running"]
+      delay: 3
+      retries: 10
+
+    - name: Wait until actual perona-operator container can receive requests
+      ansible.builtin.uri:
+        url: "{{ api_url }}/experiment/task_count"
+        method: GET
+        timeout: 5
+      register: _result
+      until: _result.status == 200
+      retries: 10
+      delay: 3
+
+    - name: "Execute --> start experiment"
+      ansible.builtin.uri:
+        url: "{{ api_url }}/experiment/schedule" 
+        method: POST
+        body_format: json
+        body: "{{ experiment_start_payload }}"
+        status_code: 200
+      tags:
+        - execute
+
+    - name: "Execute --> check if experiment is done"
+      ansible.builtin.uri:
+        url: "{{ api_url }}/experiment/task_count"
+        method: GET
+        timeout: 5
+      register: _result
+      until: _result.status == 200
+      retries: 2880 # 48 hours
+      delay: 60
+      tags:
+        - execute
+
+    - name: "Gather --> delete perona deployment"
+      kubernetes.core.k8s:
+        state: absent
+        wait: true
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        kind: Deployment
+        namespace: default
+        name: perona-operator
+      tags:
+        - gather
+
+    - name: "Gather --> delete perona pod (somewhat redundant but necessary)"
+      kubernetes.core.k8s:
+        state: absent
+        wait: true
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        kind: Pod
+        namespace: default
+        name: "{{ perona_operator_pod.resources[0].metadata.name }}"
+      tags:
+        - gather
+
+    - name: "Gather --> deploy database collector pod"
+      kubernetes.core.k8s:
+        state: present
+        wait: true
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        template: database-collector.yaml.j2
+      tags:
+        - gather
+
+    - name: "Gather --> retrieve db file from collector pod"
+      kubernetes.core.k8s_cp:
+        namespace: default
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        pod: perona-database-collector
+        container: collector
+        remote_path: /tmp/db.sqlite
+        local_path: ./results/db-{{ date_suffix_for_files }}.sqlite
+        state: from_pod
+      tags:
+        - gather
+      
+    - name: "Gather --> retrieve logs from collector pod"
+      kubernetes.core.k8s_cp:
+        namespace: default
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        pod: perona-database-collector
+        container: collector
+        remote_path: /tmp/app.log
+        local_path: ./results/app-{{ date_suffix_for_files }}.log
+        state: from_pod
+      tags:
+        - gather
+
+    - name: "Delete --> Mr. Gorbatschow, tear down this cluster! (GCP)"
+      include_tasks: _delete_gcp_instance.yml
+      loop: "{{ k3s_nodes }}"
+      when: execution_environment == 'gcp'
+      tags:
+        - delete
+
+    - name: "Delete --> Mr. Gorbatschow, tear down this cluster! (AWS)"
+      include_tasks: _delete_aws_instance.yml
+      loop: "{{ k3s_nodes }}"
+      when: execution_environment == 'aws'
+      tags:
+        - delete
+
+    - name: "Delete --> Mr. Gorbatschow, tear down this cluster! (Kind)"
+      ansible.builtin.command: 
+        cmd: kind delete cluster --name {{ kind_cluster_name }} --kubeconfig {{ playbook_dir }}/fetched/config
+      when: execution_environment == 'kind'
+      tags:
+        - delete

@@ -1,0 +1,12 @@
+plugin: amazon.aws.aws_ec2
+aws_access_key: null # put your created aws access key here
+aws_secret_key: null # put your created aws secret key here
+regions:
+  - eu-central-1
+groups:
+  k3s-worker: "tags['Name'] is defined and '-worker-' in tags['Name']"
+  k3s-master: "tags['Name'] is defined and '-master' in tags['Name']"
+filters:
+  instance-state-name : running
+compose:
+  ansible_host: public_ip_address

@@ -1,0 +1,11 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: cpu-chaos
+spec:
+  mode: all
+  stressors:
+    cpu:
+      workers: 2
+      load: 50
+  duration: 30s

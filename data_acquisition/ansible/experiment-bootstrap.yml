@@ -1,0 +1,125 @@
+---
+- name: Prepare the infrastructure for experiments
+  hosts: localhost
+  become: false
+  tasks:
+    - name: Label k8s nodes
+      kubernetes.core.k8s:
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: "{{ item.hostname }}"
+            labels:
+              mynodetype: "{{ item.perona_type }}"
+      loop: "{{ k3s_nodes }}"
+
+    - name: Add prometheus namespace
+      kubernetes.core.k8s:
+        name: prometheus
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    - name: Add prometheus helm repository
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: https://prometheus-community.github.io/helm-charts
+
+    - name: Deploy prometheus helm chart in monitoring namespace
+      kubernetes.core.helm:
+        name: prometheus
+        chart_ref: prometheus-community/kube-prometheus-stack
+        release_namespace: prometheus
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        chart_version: 34.9.0
+        values:
+          prometheus:
+            serviceMonitor:
+              selfMonitor: false
+            service:
+              type: NodePort
+              nodePort: 30090
+              targetPort: 9090
+              port: 9090
+            prometheusSpec:
+              scrapeInterval: 10s
+              nodeSelector:
+                mynodetype: supporter
+          prometheusOperator:
+            nodeSelector:
+              mynodetype: supporter
+            admissionWebhooks:
+              patch:
+                nodeSelector:
+                  mynodetype: supporter
+          kube-state-metrics:
+            nodeSelector:
+              mynodetype: supporter
+          grafana:
+            enabled: false
+          alertmanager:
+            enabled: false
+
+    - name: Add kubestone namespace
+      kubernetes.core.k8s:
+        name: kubestone
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    - name: Create directory for temporary files
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/tmp"
+        state: directory
+
+    - name: Install kubestone operator with script
+      ansible.builtin.script:
+        cmd: ./kubestone_install.sh
+
+    - name: Add chaosmesh helm repository
+      kubernetes.core.helm_repository:
+        name: chaos-mesh
+        repo_url: https://charts.chaos-mesh.org
+
+    - name: Add chaosmesh namespace
+      kubernetes.core.k8s:
+        name: chaosmesh
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    - name: Deploy chaosmesh helm chart in chaosmesh namespace
+      kubernetes.core.helm:
+        name: chaos-mesh
+        chart_ref: chaos-mesh/chaos-mesh
+        release_namespace: chaosmesh
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        chart_version: 2.2.0
+        values:
+          controllerManager:
+            replicaCount: 2
+            nodeSelector:
+              mynodetype: supporter
+          chaosDaemon:
+            runtime: containerd
+            socketPath: "{{ chaosmesh_socket_path }}"
+          dashboard:
+            create: true
+            securityMode: false
+            service:
+              type: NodePort
+              nodePort: 31333
+            nodeSelector:
+              mynodetype: supporter
+
+    - name: Deploy perona operator
+      kubernetes.core.k8s:
+        state: present
+        kubeconfig: "{{ playbook_dir }}/fetched/config"
+        template: operator-deployment.yaml.j2

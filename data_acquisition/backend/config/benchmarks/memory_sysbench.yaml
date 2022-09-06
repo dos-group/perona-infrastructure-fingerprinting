@@ -1,0 +1,11 @@
+apiVersion: perf.kubestone.xridge.io/v1alpha1
+kind: Sysbench
+metadata:
+  name: memory-sysbench
+spec:
+  image:
+    name: xridge/sysbench:1.0.17-1
+    pullPolicy: IfNotPresent
+  options: "--threads=16 --time=30 --memory-total-size=1000G"
+  testName: memory
+  command: run

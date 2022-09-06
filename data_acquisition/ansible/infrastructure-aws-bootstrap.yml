@@ -1,0 +1,135 @@
+---
+- name: Bootstrap experiment
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - credentials.yml
+
+  tasks:
+    - name: Create directory for fetched kubeconfig
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/fetched"
+        state: directory
+
+    - name: Create experiment network (VPC)
+      amazon.aws.ec2_vpc_net:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        name: perona-net
+        cidr_block: 10.10.0.0/16
+        region: "{{ aws_region }}"
+        tenancy: default
+      register: vpc_network
+
+    - name: Create Internet gateway
+      amazon.aws.ec2_vpc_igw:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ aws_region }}"
+        vpc_id: "{{ vpc_network.vpc.id }}"
+        state: present
+      register: igw
+
+    - name: Create subnet for perona-net
+      amazon.aws.ec2_vpc_subnet:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        state: present
+        vpc_id: "{{ vpc_network.vpc.id }}"
+        region: "{{ aws_region }}"
+        cidr: 10.10.1.0/24
+      register: perona_subnet
+
+    - name: Set up public subnet route table
+      amazon.aws.ec2_vpc_route_table:
+        vpc_id: "{{ vpc_network.vpc.id }}"
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        region: "{{ aws_region }}"
+        tags:
+          Name: Public
+        subnets:
+          - "{{ perona_subnet.subnet.id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw.gateway_id }}"
+
+    - name: Create EC2 security group
+      amazon.aws.ec2_group:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        name: perona-security-group
+        vpc_id: "{{ vpc_network.vpc.id }}"
+        description: perona security group
+        region: "{{ aws_region }}"
+        rules:
+          - proto: all
+            from_port: 0
+            to_port: 65535
+            cidr_ip: 0.0.0.0/0
+            rule_desc: allow everything (unsecure!)
+      register: perona_sg
+
+
+    - name: Create k3s master instance
+      include_tasks: _create_aws_instance.yml
+      vars:
+        ansible_group: k3s-master
+      loop:
+        - hostname: k3s-master
+          machine_type: m4.large
+          perona_type: master
+
+    - name: Create k3s worker instances
+      include_tasks: _create_aws_instance.yml
+      vars:
+        ansible_group: k3s-worker
+      loop: "{{ k3s_worker_instances }}"
+
+#
+# Install k3s
+#
+- name: Download k3s
+  hosts: all
+  become: true
+  pre_tasks:
+    - name: Setup hostname
+      command: hostnamectl set-hostname {{ inventory_hostname }}
+  roles:
+    - download-k3s
+  vars:
+    k3s_version: v1.21.10+k3s1
+
+- name: Install k3s-master
+  hosts: k3s-master
+  become: true
+  pre_tasks:
+    - name: apt update
+      ansible.builtin.apt:
+        update_cache: true
+  roles:
+    - k3s-master
+  vars:
+    k3s_version: v1.21.10+k3s1
+    systemd_dir: /etc/systemd/system
+    master_ip: "{{ ansible_host }}"
+    extra_server_args: --disable traefik --tls-san {{ ansible_host }}
+  vars_files:
+    - credentials.yml
+
+- name: Install k3s-worker nodes
+  hosts: k3s-worker
+  become: true
+  pre_tasks:
+    - name: apt update
+      ansible.builtin.apt:
+        update_cache: true
+  roles:
+    - k3s-node
+  vars:
+    k3s_version: v1.21.10+k3s1
+    systemd_dir: /etc/systemd/system
+    master_ip: "{{ hostvars['k3s-master']['ansible_default_ipv4']['address'] }}"
+    token: "{{ hostvars['k3s-master']['token'] }}"
+  vars_files:
+    - credentials.yml

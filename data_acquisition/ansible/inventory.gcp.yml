@@ -1,0 +1,12 @@
+plugin: gcp_compute
+projects:
+  - null # put your project name here
+auth_kind: serviceaccount
+hostnames:
+  - name
+groups:
+  k3s-worker: "'-worker-' in name"
+  k3s-master: "'-master' in name"
+service_account_file: ./perona-gcloud.json
+compose:
+  ansible_host: networkInterfaces[0].accessConfigs[0].natIP

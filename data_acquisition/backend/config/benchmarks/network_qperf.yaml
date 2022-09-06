@@ -1,0 +1,29 @@
+apiVersion: perf.kubestone.xridge.io/v1alpha1
+kind: Qperf
+metadata:
+  name: network-qperf
+spec:
+  image:
+    name: xridge/qperf:0.4.11-r0
+    pullPolicy: IfNotPresent
+
+  options: "--verbose_more --time 30 --access_recv 1"
+  tests:
+  - tcp_bw
+  - tcp_lat
+
+  serverConfiguration:
+    hostNetwork: false
+    podLabels:
+      qperf-mode: server
+    podScheduling:
+      # will be set
+      nodeName: null
+
+  clientConfiguration:
+    hostNetwork: false
+    podLabels:
+      qperf-mode: client
+    podScheduling:
+      # will be set
+      nodeName: null

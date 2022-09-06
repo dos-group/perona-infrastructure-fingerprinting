@@ -1,0 +1,54 @@
+---
+#  perona operator docker image
+operator_image_name: mcd01/perona-operator # replace this with your image repository + image name
+operator_image_tag: prod
+
+execution_environment: aws
+
+# specify file if you want db to be reused
+persistent_db_file: null
+
+cluster_storage_class_name: local-path
+
+chaosmesh_socket_path: /run/k3s/containerd/containerd.sock
+
+k3s_master_instances:
+  - hostname: k3s-master
+    machine_type: m4.large
+    perona_type: master
+
+k3s_worker_instances:
+  - hostname: k3s-worker-1
+    machine_type: m4.large
+    perona_type: supporter
+  # below: actual nodes
+  - hostname: k3s-worker-8
+    machine_type: r4.large
+    perona_type: worker
+  - hostname: k3s-worker-9
+    machine_type: r4.xlarge
+    perona_type: worker
+  - hostname: k3s-worker-10
+    machine_type: r4.2xlarge
+    perona_type: worker
+
+k3s_nodes: "{{ k3s_master_instances + k3s_worker_instances  }}"
+
+#
+# experiment description
+#
+experiment_start_payload:
+  bm_types:
+    - cpu-sysbench
+    - memory-sysbench
+    - disk-fio
+    - disk-ioping
+    - network-iperf3
+    - network-qperf
+  node_ids:
+    - k3s-worker-8@@@k3s-worker-1
+    - k3s-worker-9@@@k3s-worker-1
+    - k3s-worker-10@@@k3s-worker-1
+  num_each: 10
+  random_s: 42
+  num_anom: 0

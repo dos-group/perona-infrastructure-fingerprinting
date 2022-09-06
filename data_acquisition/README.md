@@ -1,0 +1,3 @@
+# Data Acquisition
+
+In this folder, we provide scripts and code for data gathering in the first place. In `ansible`, we automate the process of creating K3s clusters (locally with `kind`, or in the cloud (AWS or GCP)), deploying the software stack, monitoring running experiments, and automatically fetching the data to local for persistence. In `backend`, one can find our actual custom Kubernetes operator, used for triggering benchmarks, injecting chaos, collecting metrics, and observing changes. We also created an endpoint that implements the complete data acquisition logic described in our paper.

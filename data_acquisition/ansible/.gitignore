@@ -1,0 +1,8 @@
+*.retry
+fetched
+results
+tmp
+venv
+
+credentials.yml
+perona-gcloud.json

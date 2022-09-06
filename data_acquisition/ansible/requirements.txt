@@ -1,0 +1,10 @@
+requests
+google-auth
+ansible
+kubernetes
+openshift
+jsonpatch
+docker
+jmespath
+boto3
+botocore

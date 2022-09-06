@@ -1,0 +1,14 @@
+apiVersion: perf.kubestone.xridge.io/v1alpha1
+kind: Fio
+metadata:
+  name: disk-fio
+spec:
+  image:
+    name: xridge/fio:3.13-r1
+    pullPolicy: IfNotPresent
+
+  cmdLineArgs: "--name=randwrite --iodepth=1 --readwrite=randrw --blocksize=4m --size=4096M --runtime=30 --time_based=1"
+
+  volume:
+    volumeSource:
+      emptyDir: {}

@@ -1,0 +1,12 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: IOChaos
+metadata:
+  name: disk-chaos
+spec:
+  action: latency
+  mode: all
+  # The mount point of volume in the target container
+  volumePath: /data
+  delay: 0.1s
+  percent: 50
+  duration: 30s

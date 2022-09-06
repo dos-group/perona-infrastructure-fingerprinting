@@ -1,0 +1,50 @@
+---
+- name: Bootstrap experiment
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - scenario-kind.yml
+
+  tasks:
+    - name: Create directory for fetched kubeconfig
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/fetched"
+        state: directory
+
+    - name: Create directory for temporary files
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/tmp"
+        state: directory
+
+    - name: Render cluster config template
+      template:
+        src: "{{ playbook_dir }}/templates/kind-cluster-config.yaml.j2"
+        dest: "{{ playbook_dir }}/tmp/kind-cluster-config.yaml"
+        mode: 0644
+
+    - name: Retrieve list of existing kind clusters
+      ansible.builtin.command:
+        cmd: kind get clusters
+      register: existing_kind_clusters
+
+    - name: Create kind cluster
+      ansible.builtin.command: 
+        cmd: kind create cluster --config {{ playbook_dir }}/tmp/kind-cluster-config.yaml --kubeconfig {{ playbook_dir }}/fetched/config
+      when: kind_cluster_name not in existing_kind_clusters.stdout
+
+    - name: Build perona dev docker image
+      community.docker.docker_image:
+        name: "{{ operator_image_name }}"
+        tag: "{{ operator_image_tag }}"
+        build:
+          path: "{ playbook_dir }}/../backend"
+        source: build
+
+    - name: Load perona dev docker image into kind
+      ansible.builtin.command: 
+        cmd: kind --name {{ kind_cluster_name }} load docker-image {{ operator_image_name }}:{{ operator_image_tag }}
+
+    - name: Delete intermediate kind config
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/tmp/kind-cluster-config.yaml"
+        state: absent

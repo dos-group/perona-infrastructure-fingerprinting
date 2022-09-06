@@ -1,0 +1,25 @@
+---
+- name: Copy K3s service file
+  ansible.builtin.template:
+    src: k3s.service.j2
+    dest: "{{ systemd_dir }}/k3s-node.service"
+    owner: root
+    group: root
+    mode: 0755
+
+- name: Create rancher k3s directory
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+
+- name: Copy K3s registry file
+  ansible.builtin.template:
+    src: registries.yaml.j2
+    dest: /etc/rancher/k3s/registries.yaml
+
+- name: Enable and check K3s service
+  ansible.builtin.systemd:
+    name: k3s-node
+    daemon_reload: true
+    state: restarted
+    enabled: true

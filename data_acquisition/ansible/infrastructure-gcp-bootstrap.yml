@@ -1,0 +1,121 @@
+---
+- name: Bootstrap experiment
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - credentials.yml
+
+  tasks:
+    - name: Create directory for fetched kubeconfig
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/fetched"
+        state: directory
+
+    - name: Create experiment network
+      gcp_compute_network:
+        name: perona-net
+        auto_create_subnetworks: "true"
+        project: "{{ gcp_project }}"
+        auth_kind: "{{ gcp_cred_kind }}"
+        service_account_file: "{{ gcp_cred_file }}"
+        scopes:
+          - https://www.googleapis.com/auth/compute
+        state: present
+      register: network
+
+    - name: Allow internal traffic
+      gcp_compute_firewall:
+        state: present
+        name: perona-internal
+        network: "{{ network }}"
+        project: "{{ gcp_project }}"
+        auth_kind: "{{ gcp_cred_kind }}"
+        service_account_file: "{{ gcp_cred_file }}"
+        source_ranges:
+          - 10.128.0.0/9
+        allowed:
+          - ip_protocol: tcp
+            ports:
+              - 0-65535
+          - ip_protocol: udp
+            ports:
+              - 0-65535
+
+    - name: Open Ports on Firewall
+      gcp_compute_firewall:
+        state: present
+        name: perona-rules
+        network: "{{ network }}"
+        project: "{{ gcp_project }}"
+        auth_kind: "{{ gcp_cred_kind }}"
+        service_account_file: "{{ gcp_cred_file }}"
+        source_ranges:
+          - 0.0.0.0/0
+        allowed:
+          - ip_protocol: tcp
+            ports:
+              - "22"
+              - "6443"
+              - "30090"
+              - "31333"
+              - "31313"
+
+    - name: Create k3s master instance
+      include_tasks: _create_gcp_instance.yml
+      vars:
+        ansible_group: k3s-master
+      loop:
+        - hostname: k3s-master
+          machine_type: e2-medium
+          perona_type: master
+
+    - name: Create k3s worker instances
+      include_tasks: _create_gcp_instance.yml
+      vars:
+        ansible_group: k3s-worker
+      loop: "{{ k3s_worker_instances }}"
+
+#
+# Install k3s
+#
+- name: Download k3s
+  hosts: all
+  become: true
+  roles:
+    - download-k3s
+  vars:
+    k3s_version: v1.21.10+k3s1
+
+- name: Install k3s-master
+  hosts: k3s-master
+  become: true
+  pre_tasks:
+    - name: apt update
+      ansible.builtin.apt:
+        update_cache: true
+  roles:
+    - k3s-master
+  vars:
+    k3s_version: v1.21.10+k3s1
+    systemd_dir: /etc/systemd/system
+    master_ip: "{{ ansible_host }}"
+    extra_server_args: --disable traefik --tls-san {{ ansible_host }}
+  vars_files:
+    - credentials.yml
+
+- name: Install k3s-worker nodes
+  hosts: k3s-worker
+  become: true
+  pre_tasks:
+    - name: apt update
+      ansible.builtin.apt:
+        update_cache: true
+  roles:
+    - k3s-node
+  vars:
+    k3s_version: v1.21.10+k3s1
+    systemd_dir: /etc/systemd/system
+    master_ip: "{{ hostvars['k3s-master']['ansible_default_ipv4']['address'] }}"
+    token: "{{ hostvars['k3s-master']['token'] }}"
+  vars_files:
+    - credentials.yml

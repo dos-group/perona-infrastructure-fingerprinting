@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perona-database-collector
+  namespace: default
+spec:
+  containers:
+    - name: collector
+      image: busybox:1.28
+      command: ["/bin/sh", "-c", "ping localhost"]
+      volumeMounts:
+      - name: perona-pv-storage
+        mountPath: /tmp
+  volumes:
+    - name: perona-pv-storage
+      persistentVolumeClaim:  
+        claimName: perona-pv-claim
+  nodeSelector:
+    mynodetype: supporter

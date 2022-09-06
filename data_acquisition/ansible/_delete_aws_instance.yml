@@ -1,0 +1,18 @@
+---
+- name: Delete an instance with a public IP address
+  amazon.aws.ec2_instance:
+    state: absent
+    aws_access_key: "{{ aws_access_key }}"
+    aws_secret_key: "{{ aws_secret_key }}"
+    region: "{{ aws_region }}"
+    name: "{{ item.hostname }}"
+    key_name: "{{ aws_keyname }}"
+    vpc_subnet_id: "{{  perona_subnet.subnet.id }}"
+    instance_type: "{{ item.machine_type }}"
+    security_group: "{{  perona_sg.group_id }}"
+    ebs_optimized: false
+    network:
+      assign_public_ip: true
+    image_id: "{{ aws_image_ami_id }}"
+  tags:
+    - delete

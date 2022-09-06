@@ -1,0 +1,45 @@
+---
+#  perona operator docker image
+operator_image_name: perona-operator
+operator_image_tag: dev
+
+execution_environment: kind
+
+kind_cluster_name: benchmark-operator
+kind_node_image: kindest/node:v1.21.10@sha256:84709f09756ba4f863769bdcabe5edafc2ada72d3c8c44d6515fc581b66b029c
+
+# specify file if you want db to be reused
+persistent_db_file: null
+
+cluster_storage_class_name: standard
+
+chaosmesh_socket_path: /run/containerd/containerd.sock
+
+k3s_master_instances:
+  - hostname: k3s-master
+    perona_type: master
+
+k3s_worker_instances:
+  - hostname: k3s-worker-1
+    perona_type: supporter
+  - hostname: k3s-worker-2
+    perona_type: worker
+
+k3s_nodes: "{{ k3s_master_instances + k3s_worker_instances  }}"
+
+#
+# experiment description
+#
+experiment_start_payload:
+  bm_types:
+    - cpu-sysbench
+    - memory-sysbench
+    - disk-fio
+    - disk-ioping
+    - network-iperf3
+    - network-qperf
+  node_ids:
+    - k3s-worker-2@@@k3s-worker-1
+  num_each: 1
+  random_s: 42
+  num_anom: 0

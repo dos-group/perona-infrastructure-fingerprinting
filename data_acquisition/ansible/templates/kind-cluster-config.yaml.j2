@@ -1,0 +1,50 @@
+kind: Cluster
+name: {{ kind_cluster_name }}
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+# the control plane node config
+- role: control-plane
+  image: {{ kind_node_image }}
+  kubeadmConfigPatches:
+  - |
+    kind: InitConfiguration
+    nodeRegistration:
+      name: k3s-master
+      kubeletExtraArgs:
+        node-labels: "mynodetype=master"
+  extraPortMappings:
+  # perona operator
+  - containerPort: 31313
+    hostPort: 8000
+    listenAddress: "127.0.0.1"
+    protocol: TCP
+  # prometheus
+  - containerPort: 30090
+    hostPort: 9090
+    listenAddress: "127.0.0.1"
+    protocol: TCP
+  # chaos dashboard
+  - containerPort: 31333
+    hostPort: 8333
+    listenAddress: "127.0.0.1"
+    protocol: TCP
+  extraMounts:
+  - hostPath: {{ playbook_dir }}/tmp/{{ kind_cluster_name }}-k3s-master/
+    containerPath: /var/local-path-provisioner
+    readOnly: false
+# the workers
+{% for w_inst in k3s_worker_instances -%}
+- role: worker
+  image: {{ kind_node_image }}
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      name: {{ w_inst.hostname }}
+      kubeletExtraArgs:
+        node-labels: "mynodetype={{ w_inst.perona_type }}"
+  extraMounts:
+  - hostPath: {{ playbook_dir }}/tmp/{{ kind_cluster_name }}-{{ w_inst.hostname }}/
+    containerPath: /var/local-path-provisioner
+    readOnly: false
+{% endfor %}

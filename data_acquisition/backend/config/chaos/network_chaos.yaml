@@ -1,0 +1,12 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-chaos
+spec:
+  action: delay
+  mode: all
+  delay:
+    latency: 0.5s
+    jitter: 0.1s
+  direction: to
+  duration: 30s

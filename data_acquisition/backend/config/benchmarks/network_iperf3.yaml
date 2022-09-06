@@ -1,0 +1,28 @@
+apiVersion: perf.kubestone.xridge.io/v1alpha1
+kind: Iperf3
+metadata:
+  name: network-iperf3
+spec:
+  image:
+    name: xridge/iperf3:3.7.0
+    pullPolicy: IfNotPresent
+
+  serverConfiguration:
+    hostNetwork: false
+    cmdLineArgs: "--verbose --format G"
+    podLabels:
+      iperf-mode: server
+    podScheduling:
+      # will be set
+      nodeName: null
+
+  clientConfiguration:
+    hostNetwork: false
+    cmdLineArgs: "--verbose --format G -t 30 --bidir"
+    podLabels:
+      iperf-mode: client
+    podScheduling:
+      # will be set
+      nodeName: null
+
+  udp: false
