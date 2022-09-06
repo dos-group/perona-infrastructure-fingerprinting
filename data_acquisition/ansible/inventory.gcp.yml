@@ -7,6 +7,6 @@ hostnames:
 groups:
   k3s-worker: "'-worker-' in name"
   k3s-master: "'-master' in name"
-service_account_file: ./perona-gcloud.json
+service_account_file: ./perona-gcloud.json # replace with PATH_TO_YOUR_CREDENTIALS_FILE
 compose:
   ansible_host: networkInterfaces[0].accessConfigs[0].natIP
