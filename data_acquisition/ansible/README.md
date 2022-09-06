@@ -6,6 +6,8 @@ Automating the creation of Kubernetes clusters in various environments, the depl
 
 Create a virtual environment and install the required packages (`requirements.txt`).
 
+Install the necessary ansible collections with `ansible-galaxy install -r requirements.yml`.
+
 Consider making changes to `ansible.cfg`, e.g., if you use another username or a specific ssh key. You will need to create a file `credentials.yml` with the following properties:
 
 ```yaml
