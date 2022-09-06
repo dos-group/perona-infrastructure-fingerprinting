@@ -1,0 +1,20 @@
+numpy
+scipy
+dill
+scikit-learn>=1.0
+pandas
+matplotlib
+SQLAlchemy==1.4.35
+# PyTorch
+torch==1.11.0
+# PyTorch Geometric
+torch-scatter==2.0.9 -f https://data.pyg.org/whl/torch-1.11.0+cpu.html
+torch-sparse==0.6.13 -f https://data.pyg.org/whl/torch-1.11.0+cpu.html
+torch-geometric==2.0.4 -f https://data.pyg.org/whl/torch-1.11.0+cpu.html
+# PyTorch Lightning, simplifies a lot
+pytorch-lightning==1.6.4
+# Library for additional PyTorch loss functions
+pytorch-metric-learning==1.5.2
+# Hyperparameter Optimization for PyTorch
+ray[tune]==1.13.0
+optuna==2.10.1
