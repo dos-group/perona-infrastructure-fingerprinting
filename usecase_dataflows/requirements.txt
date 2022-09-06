@@ -1,0 +1,15 @@
+numpy
+scipy
+scikit-learn
+pandas
+pydantic
+seaborn
+tqdm
+matplotlib
+torch==1.11.0
+gpytorch==1.6.0
+botorch==0.6.0
+ax-platform==0.2.3
+hummingbird-ml==0.4.3
+# see: https://stackoverflow.com/a/72493690
+protobuf==3.20.*
