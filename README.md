@@ -9,5 +9,3 @@ This repository contains several subdirectories, featuring the following content
 - `method`: The actual code with respect to the modeling approach, i.e., data preprocessing, encoding, and outlier detection & ranking of benchmark runs.
 - `usecase_dataflows`: All the code necessary for our use case involving dataflows.
 - `usecase_workflows`: Instructions / Remarks regarding our use case involving workflows.
-
-All subdirectories contain further information.
