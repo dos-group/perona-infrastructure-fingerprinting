@@ -1,12 +1,13 @@
 import itertools
 
 import pytorch_lightning as pl
+import pandas as pd
 import torch
 import torch.nn.functional as F
 import torch_geometric.nn
 from pytorch_metric_learning.distances import CosineSimilarity
 from torch import nn
-from torch_geometric.nn import Sequential, TransformerConv, TAGConv
+from torch_geometric.nn import Sequential, TransformerConv, GraphNorm, TAGConv
 from torch_geometric.utils import dropout_adj
 from pytorch_metric_learning import miners, losses
 from torchvision import ops as O
@@ -19,8 +20,8 @@ from config import GeneralConfig
 
 @torch.no_grad()
 def init_weights(m):
-    """Weight / Bias Initialization."""
-    if type(m) == nn.Linear:
+    """Weight / Bias Initialization for linear layers."""
+    if isinstance(m, (torch.nn.Linear,)):
         # According to
         # 1) https://pytorch.org/docs/1.11/nn.init.html?highlight=init
         # 2) https://pytorch.org/docs/1.11/generated/torch.nn.SELU.html?highlight=selu#torch.nn.SELU
@@ -88,9 +89,10 @@ class PeronaGraphModel(pl.LightningModule):
             ("mp_conv1attmean", (lambda att_weights: att_weights.mean(dim=-1), 'att_weights -> att_weights_mean')),
             ("mp_conv2", (TAGConv(self.hidden_dim, self.hidden_dim, K=3, bias=False, normalize=False),
                           'x, tmp_edge_index, edge_weight=att_weights_mean -> x2')),
-            ("mp_convagg", (lambda x1, x2: torch.stack([x1, x2], dim=0).mean(dim=0), 'x1, x2 -> x')),
+            ("mp_convagg", (lambda x, x1, x2: torch.stack([x, x1, x2], dim=0).mean(dim=0), 'x, x1, x2 -> x')),
             ("mp_convaggact", (nn.SELU(), 'x -> x')),
-            ("mp_dropout", (nn.AlphaDropout(p=self.dropout), 'x -> x')),
+            ("mp_convaggdropout", (nn.AlphaDropout(p=self.dropout), 'x -> x')),
+            ("mp_convaggnorm", (GraphNorm(self.hidden_dim), 'x, batch -> x')),
             ("mp_lin1", (nn.Linear(self.hidden_dim, self.hidden_dim, bias=False), 'x -> x')),
             ("mp_lin1act", (nn.SELU(), 'x -> x')),
             ("mp_return", (lambda x, tmp_edge_index: (x, tmp_edge_index),
@@ -105,12 +107,12 @@ class PeronaGraphModel(pl.LightningModule):
             ("dec_lin2act", nn.Sigmoid())
         ]))
         # simple linear transformation to obtain logits for classification of benchmark types
-        self.cls_enc = nn.Linear(self.hidden_dim, self.output_dim, bias=True)
+        self.classifier = nn.Linear(self.hidden_dim, self.output_dim, bias=True)
         # non-linear transformation to obtain logits for detection of anomalous executions
-        self.cls_chaos1 = nn.Linear(self.output_dim + 1, self.output_dim + 1, bias=True)
-        self.cls_chaos2 = nn.Linear(self.output_dim + 1, 1, bias=True)
+        self.cls_chaos1 = nn.Linear(self.output_dim + self.hidden_dim, self.output_dim + self.hidden_dim, bias=True)
+        self.cls_chaos2 = nn.Linear(self.output_dim + self.hidden_dim, 1, bias=True)
 
-        # init weights / biases
+        # init weights / biases of linear layers
         self.apply(init_weights)
         # init bias of last linear layer differently (to account for class imbalance)
         nn.init.constant_(self.cls_chaos2.bias, torch.log(self.next_pos_neg_ratio).item())
@@ -140,35 +142,46 @@ class PeronaGraphModel(pl.LightningModule):
         # 1. encode metric vectors
         enc = self.encoder(data.x)
         # 2. message passing of encodings to infer from context
-        nxt, mod_e_index = self.message_passing(enc.detach().clone(), data.edge_index,
+        nxt, mod_e_index = self.message_passing(enc, data.edge_index,
                                                 data.edge_attr, data.batch, self.training, True)
-
+        
         # the first node of each graph has no precedessors and thus receives no information --> exclusion
+        # some nodes might have too few precedessors --> exclusion
         # in case of dropout-adj, some nodes might have no precedessors as well --> exclusion
-        node_targets = mod_e_index[-1].tolist()
-        valid_node_indices = [idx in node_targets for idx in range(len(data.x))]
+        counts = collections.Counter(mod_e_index[-1].tolist())
+        valid_node_indices = [counts[idx] >= data.min_graph_size.max().item() for idx in range(len(data.x))]
         # now: what are "valid" nodes and not chaos benchmark executions?
-        valid_node_mask: torch.BoolTensor = torch.tensor(valid_node_indices).to(torch.bool).to(enc.device)
-        not_chaos_mask: torch.BoolTensor = torch.eq(valid_node_mask, ~data.chaos.to(torch.bool))
+        valid_node_mask: torch.BoolTensor = torch.tensor(valid_node_indices).to(data.chaos)
+        not_chaos_mask: torch.BoolTensor = torch.logical_and(valid_node_mask, ~data.chaos)
 
         # simplify downstream evaluation
         nxt = (nxt * valid_node_mask.to(torch.long)[:, None]) + \
               (enc.detach().clone() * (~valid_node_mask).to(torch.long)[:, None])
+        
+        # 3. classify
+        enc_cls = self.classifier(enc)
+        nxt_cls = self.classifier(nxt)
 
-        # 3. decode metric vectors
-        dec = self.decoder(enc)
         # 4. get indication of anomaly-likeliness
         enc_norm = torch.linalg.vector_norm(enc, ord=GeneralConfig.vector_norm_ord, dim=-1, keepdim=False)
         nxt_norm = torch.linalg.vector_norm(nxt, ord=GeneralConfig.vector_norm_ord, dim=-1, keepdim=False)
-        dist_norm = (enc_norm - nxt_norm).reshape(-1, 1)
 
-        chaos_logits = self.cls_chaos2(F.selu(self.cls_chaos1(torch.cat([data.onehot, dist_norm], dim=-1)))).reshape(-1)
+        chaos_logits = self.cls_chaos2(F.selu(self.cls_chaos1(torch.cat([enc - nxt,
+                                                                         data.onehot], dim=-1)))).reshape(-1)
+        # simplify downstream evaluation
+        chaos_logits = (chaos_logits * valid_node_mask.to(torch.long)[:]) + \
+              (torch.logit(data.chaos.detach().clone().to(torch.long)) * (~valid_node_mask).to(torch.long)[:])
 
         # simplify downstream evaluation
         nxt = (nxt * not_chaos_mask.to(torch.long)[:, None]) + \
               (enc.detach().clone() * (~not_chaos_mask).to(torch.long)[:, None])
-
-        return enc, enc_norm, dec, self.cls_enc(enc), nxt, nxt_norm, self.decoder(nxt), self.cls_enc(nxt), chaos_logits
+        
+        # 5. decode
+        enc_dec = self.decoder(enc)
+        nxt_dec = self.decoder(nxt)
+        
+        
+        return enc, enc_norm, enc_dec, enc_cls, nxt, nxt_norm, nxt_dec, nxt_cls, chaos_logits
 
     @torch.no_grad()
     def configure_optimizers(self):
@@ -183,6 +196,7 @@ class PeronaGraphModel(pl.LightningModule):
         decay = set()
         no_decay = set()
         whitelist_weight_modules = (torch.nn.Linear, torch_geometric.nn.Linear,)
+        blacklist_weight_modules = (GraphNorm,)
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
                 fpn = '%s.%s' % (mn, pn) if mn else pn  # full param name
@@ -195,6 +209,9 @@ class PeronaGraphModel(pl.LightningModule):
                 elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
                     # weights of whitelist modules will be weight decayed
                     decay.add(fpn)
+                elif any([pn.endswith(opt) for opt in ['weight', 'mean_scale']]) and isinstance(m, blacklist_weight_modules):
+                    # weights of blacklist modules will NOT be weight decayed
+                    no_decay.add(fpn)
 
         # validate that we considered every parameter
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -214,24 +231,24 @@ class PeronaGraphModel(pl.LightningModule):
         return optimizer
 
     def training_step(self, data, batch_idx):
-        results_dict: dict = self.calculate_batch_sores("train", data)
-        results_dict["loss"] = results_dict["train_loss_curr"]
-        return results_dict
-
-    def training_epoch_end(self, outputs):
-        self.calculate_epoch_scores("train", outputs)
+        with torch.no_grad():
+            data.x += torch.normal(0, 0.01, size=data.x.shape).to(data.x) # add some noise
+            data.edge_attr += torch.normal(0, 0.01, size=data.edge_attr.shape).to(data.edge_attr) # add some noise
+        result_dict = self.calculate_batch_sores("train", data)
+        result_dict["loss"] = result_dict["train_loss"]
+        return result_dict
 
     def validation_step(self, data, batch_idx):
         return self.calculate_batch_sores("val", data)
-
+        
     def validation_epoch_end(self, outputs):
-        self.calculate_epoch_scores("val", outputs)
+        """ Necessary because of ray-tune integration."""
+        result_dict = {f"ptl/{k}":v for k, v in pd.DataFrame(outputs).mean(axis=0).to_dict().items()}
+        self.log_dict(result_dict, prog_bar=False, logger=False)
+        self.logger.agg_and_log_metrics(result_dict, step=self.current_epoch)
 
     def test_step(self, data, batch_idx):
         return self.calculate_batch_sores("test", data)
-
-    def test_epoch_end(self, outputs):
-        self.calculate_epoch_scores("test", outputs)
 
     def calculate_batch_sores(self, name, data):
         class_clustering_loss = losses.MultipleLosses(
@@ -239,9 +256,7 @@ class PeronaGraphModel(pl.LightningModule):
             [miners.TripletMarginMiner(distance=CosineSimilarity())]
         )
 
-        enc, enc_norm, dec_enc, cls_enc, nxt, nxt_norm, dec_nxt, cls_nxt, chaos_logits = self(data)
-
-        chaos_true = data.chaos.to(enc.dtype)
+        enc, enc_norm, enc_dec, enc_cls, nxt, nxt_norm, nxt_dec, nxt_cls, chaos_logits = self(data)
 
         chaos: torch.Tensor
         with torch.no_grad():
@@ -249,7 +264,8 @@ class PeronaGraphModel(pl.LightningModule):
             chaos_pred_mod = torch.zeros((len(chaos), 2)).to(chaos)
             chaos_pred_mod[chaos < 0.5, 0] = 1
             chaos_pred_mod[chaos >= 0.5, 1] = 1
-
+        
+        chaos_true = data.chaos.to(enc.dtype)
         pos_samples_divider: torch.Tensor = getattr(chaos_true, "sum" if data.chaos.any() else "numel")()
         # used for loss computation
         loss_terms_dict: dict = {
@@ -258,22 +274,18 @@ class PeronaGraphModel(pl.LightningModule):
                                                            gamma=self.focal_gamma,
                                                            alpha=self.focal_alpha,
                                                            reduction='sum') / pos_samples_divider,
-            # pos-weighting to account for imbalance
-            f"{name}_loss_chaos_bce": F.binary_cross_entropy_with_logits(chaos_logits, chaos_true,
-                                                                         pos_weight=self.next_neg_pos_ratio.to(enc),
-                                                                         reduction='sum') / pos_samples_divider,
-            f"{name}_loss_this_ce": F.cross_entropy(cls_enc, data.bm_id),
-            f"{name}_loss_next_ce": F.cross_entropy(cls_nxt, data.bm_id),
-            f"{name}_loss_this_mse": F.mse_loss(dec_enc, data.x),
-            f"{name}_loss_next_mse": F.mse_loss(dec_nxt, data.x),
+            f"{name}_loss_this_ce": F.cross_entropy(enc_cls, data.bm_id),
+            f"{name}_loss_next_ce": F.cross_entropy(nxt_cls, data.bm_id),
+            f"{name}_loss_this_mse": F.mse_loss(enc_dec, data.x),
+            f"{name}_loss_next_mse": F.mse_loss(nxt_dec, data.x),
             f"{name}_loss_cls_clst": class_clustering_loss(
                 torch.cat([enc, nxt], dim=0),
-                torch.cat([data.bm_id, data.bm_id], dim=-1)),
-            f"{name}_loss_this_normal_rkg": F.margin_ranking_loss(enc_norm[data.ranking_indices_all_normal[:, 0]],
+                data.bm_id.repeat(2)),
+            f"{name}_loss_this_normal_rkg": F.margin_ranking_loss(enc_norm[data.ranking_indices_all_normal[:, 0]] * data.ranking_factors_all_normal,
                                                                   enc_norm[data.ranking_indices_all_normal[:, 1]],
                                                                   data.ranking_targets_all_normal,
                                                                   margin=0),
-            f"{name}_loss_next_normal_rkg": F.margin_ranking_loss(nxt_norm[data.ranking_indices_all_normal[:, 0]],
+            f"{name}_loss_next_normal_rkg": F.margin_ranking_loss(nxt_norm[data.ranking_indices_all_normal[:, 0]] * data.ranking_factors_all_normal,
                                                                   nxt_norm[data.ranking_indices_all_normal[:, 1]],
                                                                   data.ranking_targets_all_normal,
                                                                   margin=0)
@@ -281,46 +293,29 @@ class PeronaGraphModel(pl.LightningModule):
         # the following loss term only applies when chaos is present
         if len(data.ranking_indices_all_chaos):
             loss_terms_dict[f"{name}_loss_this_chaos_rkg"] = F.margin_ranking_loss(
-                enc_norm[data.ranking_indices_all_chaos[:, 0]],
+                enc_norm[data.ranking_indices_all_chaos[:, 0]] * data.ranking_factors_all_chaos,
                 enc_norm[data.ranking_indices_all_chaos[:, 1]],
                 data.ranking_targets_all_chaos,
                 margin=self.margin)
-
-        # primarily for torchmetrics
-        results_dict: dict = {
-            f"{name}_chaos": (chaos_pred_mod, data.chaos),
-            f"{name}_this_acc": (cls_enc, data.bm_id),
-            f"{name}_next_acc": (cls_nxt, data.bm_id),
-            f"{name}_this_mse": (dec_enc, data.x),
-            f"{name}_next_mse": (dec_nxt, data.x),
-            # form additive losses
-            f"{name}_loss": sum([v for k, v in loss_terms_dict.items() if not k.endswith("_loss_chaos_foc")]),
-            f"{name}_loss_curr": sum([v for k, v in loss_terms_dict.items() if not k.endswith("_loss_chaos_bce")]),
+        
+        to_log_dict = {
+            f"{name}_loss": sum(list(loss_terms_dict.values())),
+            f"{name}_chaos": (chaos_pred_mod, data.chaos.to(torch.long)),
+            f"{name}_this_acc": (enc_cls, data.bm_id),
+            f"{name}_next_acc": (nxt_cls, data.bm_id),
+            f"{name}_this_mse": (enc_dec, data.x),
+            f"{name}_next_mse": (nxt_dec, data.x)
         }
-        return results_dict
-
-    @torch.no_grad()
-    def calculate_epoch_scores(self, name, outputs):
-        collector_dict: dict = {}
-        reduced_dict: dict = {}
-
-        for batch_result in outputs:
-            for result_name, result_value in batch_result.items():
-                if result_name.startswith(name):
-                    collector_dict[result_name] = collector_dict.get(result_name, []) + [result_value]
-
-        for result_name, value_list in collector_dict.items():
-            if any([result_name.endswith(opt) for opt in ["_loss", "_loss_curr"]]):
-                reduced_dict[result_name] = torch.stack(value_list).mean()
-                if name != "predict":
-                    self.log(f"ptl/{result_name}", reduced_dict[result_name], prog_bar=False)
-            else:  # torchmetric case
-                ypred, target = [torch.cat(inner_list, dim=0) for inner_list in list(zip(*value_list))]
-                metric_clazz_instance = getattr(self, result_name)
-                response = metric_clazz_instance(ypred, target)
-                response = response if isinstance(response, dict) else {result_name: response}
-                reduced_dict.update(response)
-                if name != "predict":
-                    self.log_dict({f"ptl/{k}": v for k, v in response.items()}, prog_bar=False)
-
-        return reduced_dict
+        
+        to_return_dict = {}
+        for m_name, m_value in to_log_dict.items():
+            log_dict, batch_size = {m_name: m_value}, len(enc)
+            if isinstance(m_value, tuple):
+                m_cls_inst = getattr(self, m_name)
+                out = m_cls_inst(*m_value)
+                log_dict, batch_size = out if isinstance(out, dict) else {m_name: out}, len(m_value[0])
+            self.log_dict(log_dict, prog_bar=False, on_epoch=True, batch_size=batch_size)
+            to_return_dict = {**to_return_dict, **log_dict}
+            
+        return to_return_dict
+       

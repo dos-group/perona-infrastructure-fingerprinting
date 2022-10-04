@@ -13,7 +13,7 @@ import pytorch_lightning as pl
 import torch
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
-from sqlalchemy import inspect, and_, asc, create_engine
+from sqlalchemy import inspect, and_, or_, asc, create_engine, Index
 from sqlalchemy.orm import Session, subqueryload
 from torch_geometric import transforms
 from torch_geometric.loader import DataLoader
@@ -21,7 +21,7 @@ from modeling.utils import init_logging
 from pathlib import Path
 
 from modeling.transforms import GraphCreator, PeronaCompose, FeatureSelector, MinMaxScaler, FeatureUnifier, \
-    GraphFinalizer, FeatureRotator, PeronaData
+    GraphFinalizer, FeatureRotator, PeronaData, FeaturePreprocessor
 from orm.models import Benchmark, BenchmarkMetric, NodeMetric
 
 
@@ -62,9 +62,10 @@ class PeronaDataModule(pl.LightningDataModule):
 
         self.transform: PeronaCompose = PeronaCompose([
             FeatureUnifier(),
+            FeaturePreprocessor(),
             FeatureSelector(min_std=0.01),
             FeatureRotator(),
-            GraphCreator(min_graph_size=4, max_graph_size=4),
+            GraphCreator(min_graph_size=4, max_graph_size=8),
             MinMaxScaler(target_property_name="x"),
             MinMaxScaler(target_property_name="edge_attr"),
             GraphFinalizer(),
@@ -72,39 +73,82 @@ class PeronaDataModule(pl.LightningDataModule):
         ])
 
     def prepare_data(self, prepare_data_splits: bool = True) -> Union[None, pd.DataFrame]:
+        
+        def retrieve_and_extract_node_metrics(cond, suffix):
+            node_metrics = session \
+                            .query(NodeMetric.metric, NodeMetric.value) \
+                            .filter(cond) \
+                            .order_by(asc(NodeMetric.timestamp)) \
+                            .distinct(NodeMetric.metric) \
+                            .all()
+            agg_dict: dict = {}
+            for k, v in node_metrics:
+                agg_dict[k] = agg_dict.get(k, []) + [float(v)]
+            new_dict: dict = {}
+            for k, v_list in agg_dict.items():
+                percentiles: List[int] = [10, 50, 90]
+                for perc, perc_val in zip(percentiles, np.percentile(np.array(v_list), percentiles)):
+                    new_dict[f"node_metric_{k}_{perc}th_{suffix}"] = float(perc_val)
+            return new_dict
+        
         if not os.path.exists(self.real_artifact_path):
             all_results: List[pd.DataFrame] = []
-            for data_path, artifact_path in zip(self.data_paths, self.artifact_paths):
+            for data_path in self.data_paths:
                 temp_results = []
-                with Session(create_engine(f"sqlite+pysqlite:///{data_path}")) as session:
+                engine = create_engine(f"sqlite+pysqlite:///{data_path}")
+                with Session(engine) as session:
+                    try:
+                        Index('BenchmarkMetric_benchmark_id_idx', BenchmarkMetric.benchmark_id).create(bind=engine)
+                    except:
+                        pass
+                    try:
+                        Index('NodeMetric_node_name_idx', NodeMetric.node_name).create(bind=engine)
+                    except:
+                        pass
+                    try:
+                        Index('NodeMetric_timestamp_idx', NodeMetric.timestamp).create(bind=engine)
+                    except:
+                        pass
+                    
                     rows = session \
                         .query(Benchmark) \
                         .options(subqueryload(Benchmark.metrics)) \
                         .join(BenchmarkMetric, Benchmark.id == BenchmarkMetric.benchmark_id)
                     for row in rows:
                         row_dict: dict = object_as_dict(row)
+                        row_dict["duration"] = (row_dict["finished"] - row_dict["started"]).total_seconds()
                         metrics = row_dict.pop("metrics", [])
                         for m in metrics:
                             row_dict[f"{row_dict['type']}-{m['name']}"] = (m["value"], m["unit"])
-                        # get start-date and end-date (relaxed range)
-                        start_date = row_dict["started"] - timedelta(seconds=10)
-                        end_date = row_dict["finished"] + timedelta(seconds=10)
-                        node_metrics = session \
-                            .query(NodeMetric.metric, NodeMetric.value) \
-                            .filter(and_(NodeMetric.timestamp <= end_date,
-                                         NodeMetric.timestamp > start_date,
-                                         NodeMetric.node_name == row_dict["node_id"])) \
-                            .order_by(asc(NodeMetric.timestamp)) \
-                            .distinct(NodeMetric.metric) \
-                            .all()
-
-                        agg_dict: dict = {}
-                        for k, v in node_metrics:
-                            agg_dict[k] = agg_dict.get(k, []) + [float(v)]
-                        for k, v_list in agg_dict.items():
-                            percentiles: List[int] = [10, 50, 90]
-                            for perc, perc_val in zip(percentiles, np.percentile(np.array(v_list), percentiles)):
-                                row_dict[f"node_metric_{k}_{perc}th"] = float(perc_val)
+                        
+                        # ranges with respect to our prometheus config (agg-intervals of 20s, agg-action every 10s)
+                        node_id = row_dict["node_id"]
+                        # prev_metrics: get start-date and end-date (relaxed range)
+                        prev_start_date = row_dict["started"] - timedelta(seconds=50)
+                        prev_end_date = row_dict["started"] + timedelta(seconds=10)
+                        prev_cond = and_(NodeMetric.timestamp <= prev_end_date,
+                                         NodeMetric.timestamp > prev_start_date,
+                                         NodeMetric.node_name == node_id)
+                        node_metrics_prev = retrieve_and_extract_node_metrics(prev_cond, "prev")
+                        # next_metrics: get start-date and end-date (relaxed range)
+                        next_start_date = row_dict["finished"] + timedelta(seconds=10)
+                        next_end_date = row_dict["finished"] + timedelta(seconds=70)
+                        next_cond = and_(NodeMetric.timestamp <= next_end_date,
+                                         NodeMetric.timestamp > next_start_date,
+                                         NodeMetric.node_name == node_id)
+                        node_metrics_next = retrieve_and_extract_node_metrics(next_cond, "next")
+                        # surr_metrics: get start-date and end-date (relaxed range)
+                        node_metrics_surr = retrieve_and_extract_node_metrics(or_(prev_cond, next_cond), "surr")
+                        # curr_metrics: get start-date and end-date (relaxed range)
+                        curr_start_date = row_dict["started"] - timedelta(seconds=10)
+                        curr_end_date = row_dict["finished"] + timedelta(seconds=10)
+                        curr_cond = and_(NodeMetric.timestamp <= curr_end_date,
+                                         NodeMetric.timestamp > curr_start_date,
+                                         NodeMetric.node_name == node_id)
+                        node_metrics_curr = retrieve_and_extract_node_metrics(curr_cond, "curr")
+                        # add aggregated metrics
+                        row_dict = {**row_dict, **node_metrics_prev, **node_metrics_next,
+                                    **node_metrics_surr, **node_metrics_curr}
                         temp_results.append(row_dict)
                 temp_df: pd.DataFrame = pd.DataFrame(temp_results)
                 all_results.append(temp_df)

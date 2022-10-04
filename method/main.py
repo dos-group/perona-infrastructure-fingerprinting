@@ -73,16 +73,17 @@ summary_df: pd.DataFrame = HyperOptimizer.test_and_predict_with_best(checkpoint_
                                                                      num_gpus=num_gpus)
 
 loc_summary_df = copy.deepcopy(summary_df)
+predecessor_mask = loc_summary_df.num_predecessors >= loc_summary_df.min_graph_size.max()
 print("#" * 30, "Outlier Detection Report", "#" * 30)
 y_true = loc_summary_df.chaos.values
 y_pred = np.zeros_like(y_true)
 y_pred[expit(loc_summary_df.inf_chaos_logits.values) >= 0.5] = 1
 target_names = ['Normal', 'Outlier']
-print(classification_report(y_true, y_pred, target_names=target_names))
+print(classification_report(y_true[predecessor_mask], y_pred[predecessor_mask], target_names=target_names))
 
 print("#" * 30, "Benchmark-Type Classification Report", "#" * 30)
 y_true = loc_summary_df.bm_id.values
-y_pred = np.argmax(np.array(loc_summary_df["inf_cls_enc"].tolist()), axis=1)
+y_pred = np.argmax(np.array(loc_summary_df["inf_enc_cls"].tolist()), axis=1)
 target_names = list(sorted(list(loc_summary_df["bm_name"].unique())))
 print(classification_report(y_true, y_pred, target_names=target_names))
 

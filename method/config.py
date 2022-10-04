@@ -53,12 +53,12 @@ class TuneConfig(object):
         "dropout": tune.choice([0.0, 0.1, 0.2]),
         "root_weight": tune.choice([False, True]),
         # loss config
-        # --> (controls focal loss, almost same range as in https://arxiv.org/pdf/1901.05555.pdf)
-        "focal_gamma": tune.choice([0.5, 1.0, 2.0, 5.0]),
-        # --> (controls class-balanced loss, same range as in https://arxiv.org/pdf/1901.05555.pdf)
-        "classbalanced_beta": tune.choice([0.9, 0.99, 0.999, 0.9999]),
+        # --> (controls focal loss)
+        "focal_gamma": tune.choice([2]),
+        # --> (controls class-balanced loss)
+        "classbalanced_beta": tune.choice([0.9999]),
         # --> (controls marginranking loss)
-        "ranking_margin_factor": tune.choice([1, 2, 4, 8]),
+        "ranking_margin_factor": tune.choice([4]),
         # optimizer config
         "learning_rate": tune.choice([0.1, 0.01, 0.001]),
         "weight_decay": tune.choice([0.01, 0.001, 0.0001])

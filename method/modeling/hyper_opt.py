@@ -6,6 +6,7 @@ import logging
 import time
 import pandas as pd
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import StochasticWeightAveraging
 from pytorch_lightning.strategies import SingleDeviceStrategy
 from pytorch_lightning.utilities.model_summary import ModelSummary
 from ray import tune
@@ -23,7 +24,7 @@ from modeling.models import PeronaGraphModel
 from pytorch_lightning.utilities.warnings import PossibleUserWarning, LightningDeprecationWarning
 import warnings
 
-metric_columns: List[str] = ["val_loss", "val_loss_curr",
+metric_columns: List[str] = ["val_loss",
                              "val_chaos_acc", "val_chaos_rec", "val_chaos_pre", "val_chaos_f1s",
                              "val_this_mse", "val_this_acc", "val_next_mse", "val_next_acc"]
 
@@ -38,6 +39,8 @@ class HyperOptimizer(object):
         return pl.Trainer(strategy=strategy,
                           enable_progress_bar=False,
                           log_every_n_steps=1000,  # we don't want this intermediate logging
+                          # clip gradients' global norm to <=0.5 using gradient_clip_algorithm='norm' by default
+                          gradient_clip_val=0.5,
                           **kwargs)
 
     @staticmethod
@@ -93,17 +96,17 @@ class HyperOptimizer(object):
         with torch.no_grad():
             for batch_idx, batch in enumerate(DataLoader(inf_list, batch_size=batch_size, shuffle=False)):
                 batch = batch.to(model.device)
-                enc, enc_norm, dec_enc, cls_enc, nxt, nxt_norm, dec_nxt, cls_nxt, chaos_logits = model(batch)
+                enc, enc_norm, enc_dec, enc_cls, nxt, nxt_norm, nxt_dec, nxt_cls, chaos_logits = model(batch)
                 # get raw embeddings
                 output_dict: dict = {
                     "inf_enc": enc,
                     "inf_enc_norm": enc_norm,
-                    "inf_dec_enc": dec_enc,
-                    "inf_cls_enc": cls_enc,
+                    "inf_enc_dec": enc_dec,
+                    "inf_enc_cls": enc_cls,
                     "inf_nxt": nxt,
                     "inf_nxt_norm": nxt_norm,
-                    "inf_dec_nxt": dec_nxt,
-                    "inf_cls_nxt": cls_nxt,
+                    "inf_nxt_dec": nxt_dec,
+                    "inf_nxt_cls": nxt_cls,
                     "inf_chaos_logits": chaos_logits
                 }
                 for node_idx in range(len(enc)):
@@ -217,6 +220,7 @@ class HyperOptimizer(object):
         tune_callback = TuneReportCheckpointCallback(metrics={v: f"ptl/{v}" for v in metric_columns},
                                                      filename="checkpoint",
                                                      on="validation_end")
+        swa_callback = StochasticWeightAveraging(swa_lrs=1e-2)
 
         resume_from_checkpoint = os.path.join(checkpoint_dir, "checkpoint") if checkpoint_dir is not None else None
         
@@ -224,6 +228,6 @@ class HyperOptimizer(object):
                                                       gpus=num_gpus,
                                                       resume_from_checkpoint=resume_from_checkpoint,
                                                       max_epochs=num_epochs,
-                                                      callbacks=[tune_callback])
+                                                      callbacks=[tune_callback, swa_callback])
 
         trainer.fit(model, datamodule=datamodule)
