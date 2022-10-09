@@ -1,6 +1,7 @@
 import argparse
 import copy
 import os
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
@@ -73,19 +74,53 @@ summary_df: pd.DataFrame = HyperOptimizer.test_and_predict_with_best(checkpoint_
                                                                      num_gpus=num_gpus)
 
 loc_summary_df = copy.deepcopy(summary_df)
-predecessor_mask = loc_summary_df.num_predecessors >= loc_summary_df.min_graph_size.max()
-print("#" * 30, "Outlier Detection Report", "#" * 30)
-y_true = loc_summary_df.chaos.values
-y_pred = np.zeros_like(y_true)
-y_pred[expit(loc_summary_df.inf_chaos_logits.values) >= 0.5] = 1
-target_names = ['Normal', 'Outlier']
-print(classification_report(y_true[predecessor_mask], y_pred[predecessor_mask], target_names=target_names))
+print(loc_summary_df.num_predecessors.value_counts())
 
-print("#" * 30, "Benchmark-Type Classification Report", "#" * 30)
-y_true = loc_summary_df.bm_id.values
-y_pred = np.argmax(np.array(loc_summary_df["inf_enc_cls"].tolist()), axis=1)
-target_names = list(sorted(list(loc_summary_df["bm_name"].unique())))
-print(classification_report(y_true, y_pred, target_names=target_names))
+for selector in ["ALL"] + loc_summary_df.num_predecessors.unique().tolist():
+    mask = loc_summary_df.num_predecessors >= loc_summary_df.min_predecessors.max()
+    if selector != "ALL":
+        mask = mask & (loc_summary_df.num_predecessors == selector)
+    df_view = copy.deepcopy(loc_summary_df.loc[mask, :])
+    if not len(df_view) or len(df_view.chaos.unique()) == 1:
+        continue
+    
+    print_string = " ".join(["#" * 30, f"Outlier Detection Report [{selector}]", "#" * 30])
+    print("#" * len(print_string), "\n", print_string, "\n", "#" * len(print_string))
+    y_true = df_view.chaos.values
+    y_pred = np.zeros_like(y_true)
+    y_pred[expit(df_view.inf_chaos_logits.values) >= 0.5] = 1
+    target_names = ['Normal', 'Outlier']
+    print(classification_report(y_true, y_pred, target_names=target_names), "\n")
+    
+for selector in ["ALL"] + loc_summary_df.num_predecessors.unique().tolist():
+    mask = loc_summary_df.num_predecessors >= loc_summary_df.min_predecessors.max()
+    if selector != "ALL":
+        mask = mask & (loc_summary_df.num_predecessors == selector)
+    df_view = copy.deepcopy(loc_summary_df.loc[mask, :])
+    if not len(df_view) or len(df_view.chaos.unique()) == 1:
+        continue
 
-summary_df.to_csv(os.path.join(Path(__file__).parents[0].absolute(), "artifacts",
-                               f"{inference_data_name}_{exp_suffix}_results.csv"), index=False)
+    print_string = " ".join(["#" * 30, f"Benchmark-Type Classification Report [{selector}]", "#" * 30])
+    print("#" * len(print_string), "\n", print_string, "\n", "#" * len(print_string))
+    y_true = df_view.bm_id.values
+    y_pred = np.argmax(np.array(df_view["inf_enc_cls"].tolist()), axis=1)
+    target_names = list(sorted(list(df_view["bm_name"].unique())))
+    print(classification_report(y_true, y_pred, target_names=target_names), "\n")
+
+artifacts_path = Path(os.path.join(Path(__file__).parents[0].absolute(), "artifacts"))
+summary_df.to_csv(os.path.join(artifacts_path, f"{inference_data_name}_{exp_suffix}_results.csv"), index=False)
+
+path_to_zip_archive = os.path.join(artifacts_path, f"{inference_data_name}_{exp_suffix}_archive.zip")
+if not os.path.exists(path_to_zip_archive):
+    with zipfile.ZipFile(path_to_zip_archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        modeling_path = os.path.join(Path(__file__).parents[0].absolute(), "modeling")
+        orm_path = os.path.join(Path(__file__).parents[0].absolute(), "orm")
+        for my_dir in [modeling_path, orm_path]:
+            my_dir_path = Path(my_dir)
+            for entry in my_dir_path.rglob("*"):
+                if entry.is_file() and str(entry).endswith(".py"):
+                    zip_file.write(entry, entry.relative_to(my_dir_path.parent))
+        for single_file_name in ["config.py", "requirements.txt"]:
+            path_to_single_file_name = Path(os.path.join(Path(__file__).parents[0].absolute(), single_file_name))
+            zip_file.write(path_to_single_file_name, path_to_single_file_name.relative_to(artifacts_path.parent))
+    print("Zip-File written.")

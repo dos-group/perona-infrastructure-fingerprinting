@@ -39,8 +39,9 @@ class HyperOptimizer(object):
         return pl.Trainer(strategy=strategy,
                           enable_progress_bar=False,
                           log_every_n_steps=1000,  # we don't want this intermediate logging
-                          # clip gradients' global norm to <=0.5 using gradient_clip_algorithm='norm' by default
-                          gradient_clip_val=0.5,
+                          # clip gradients' global norm to <='gradient_clip_val' using 'gradient_clip_algorithm'
+                          gradient_clip_val=GeneralConfig.gradient_clip_val,
+                          gradient_clip_algorithm=GeneralConfig.gradient_clip_algorithm,
                           **kwargs)
 
     @staticmethod
@@ -112,12 +113,14 @@ class HyperOptimizer(object):
                 for node_idx in range(len(enc)):
                     intermediate_dict = {"batch_idx": batch_idx, "node_idx": node_idx}
                     temp_dict = {**batch.to_dict(), **output_dict}
+                    batch_size = len(temp_dict["batch"].unique())
                     for k, v in temp_dict.items():
                         if any([k.startswith(opt) for opt in ["edge_index", "edge_attr", "input_dim",
                                                               "edge_dim", "output_dim", "ptr", "ranking_"]]):
                             continue
-                        intermediate_dict[k] = v[node_idx].tolist() if torch.is_tensor(v) \
-                            else v[temp_dict["batch"][node_idx]]
+                        resp = v[temp_dict["batch"][node_idx]] if len(v) == batch_size else v[node_idx]
+                        resp = resp.tolist() if torch.is_tensor(resp) else resp
+                        intermediate_dict[k] = resp
                     result_list.append(intermediate_dict)
         return pd.DataFrame(result_list)
 
@@ -151,6 +154,9 @@ class HyperOptimizer(object):
             search_alg, **concurrency_limiter_config)
 
         tune_run_name = f"{hyperoptimizer_instance.job_identifier}_{exp_suffix}"
+        
+        # sets seeds for numpy, torch and python.random.
+        pl.seed_everything(GeneralConfig.seed, workers=True)
 
         start = time.time()
 
@@ -210,10 +216,16 @@ class HyperOptimizer(object):
             "input_dim": datamodule.input_dim,
             "edge_dim": datamodule.edge_dim,
             "output_dim": datamodule.output_dim,
+            "predecessor_dim": datamodule.predecessor_dim,
             "ranking_margin": datamodule.ranking_margin,
             "next_neg_sample_count": datamodule.next_neg_sample_count,
             "next_pos_sample_count": datamodule.next_pos_sample_count
         }
+        
+        # config["seed"] is set deterministically, but differs between training runs
+        # sets seeds for numpy, torch and python.random.
+        pl.seed_everything(config["seed"], workers=True)
+        
         model = PeronaGraphModel(**{**fixed_model_args, **config}).double().to(device)
         print(ModelSummary(model, max_depth=-1), "\n")
 

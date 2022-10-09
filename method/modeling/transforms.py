@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn import preprocessing
+from sklearn.preprocessing import OneHotEncoder
 from torch_geometric.data import Data
 from torch_geometric.transforms import BaseTransform, Compose
 
@@ -258,11 +259,11 @@ class FeatureRotator(PeronaBaseTransform):
 
 
 class GraphCreator(PeronaBaseTransform):
-    def __init__(self, min_graph_size: int = 4, max_graph_size: int = 4, date_col: str = "started",
+    def __init__(self, min_predecessors: int = 3, max_predecessors: int = 7, date_col: str = "started",
                  id_col: str = "type", node_id_col: str = "node_id", chaos_col: str = "chaos_applied", *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.min_graph_size: int = min_graph_size
-        self.max_graph_size: int = max_graph_size
+        self.min_predecessors: int = min_predecessors
+        self.max_predecessors: int = max_predecessors
         self.date_col: str = date_col
         self.id_col: str = id_col
         self.node_id_col: str = node_id_col
@@ -283,22 +284,34 @@ class GraphCreator(PeronaBaseTransform):
 
     @staticmethod
     def _calculate_edges(prev_node_metrics_slice: np.ndarray, curr_node_metrics_slice: np.ndarray,
-                         date_series_slice: pd.DataFrame, chaos_series_slice: pd.DataFrame):
+                         date_series_slice: pd.Series, chaos_series_slice: pd.Series):
         edge_index = []
         edge_attr = []
+        cumsum_chaos_series_slice = pd.Series(np.cumsum(chaos_series_slice.values))
         for a in range(len(date_series_slice)):
             for b in range(a, len(date_series_slice)):
-                # only forward connections + only normal nodes may send data
-                if a < b and not chaos_series_slice.iloc[a]:
+                # only forward connections + only normal nodes may send data (except self-loops)
+                if (a < b and not chaos_series_slice.iloc[a]) or (a == b):
                     edge_index.append((a, b))
                     timedelta = date_series_slice.iloc[b] - date_series_slice.iloc[a]
-                    edge_attr.append(prev_node_metrics_slice[a].reshape(-1).tolist() + [
-                                         1 / max(1, b - a),
-                                         GraphCreator._calculate_edge_feature(timedelta.seconds, 60),
-                                         GraphCreator._calculate_edge_feature(timedelta.seconds, 3600),
-                                         GraphCreator._calculate_edge_feature(timedelta.seconds, 3600 * 24),
-                                         GraphCreator._calculate_edge_feature(timedelta.seconds, 3600 * 24 * 7)
-                                     ] + prev_node_metrics_slice[b].reshape(-1).tolist())
+                    edge_attr.append(
+                        # node metric differences
+                        (curr_node_metrics_slice[a] - prev_node_metrics_slice[a]).reshape(-1).tolist() + [
+                        # spatial distance
+                        1 / 2 ** (b - a),
+                        # has the previous execution be anomalous?
+                        chaos_series_slice.iloc[b-1],
+                        # how many anomalies in-between?
+                        cumsum_chaos_series_slice.iloc[b-1] - cumsum_chaos_series_slice.iloc[a],
+                        # time-related features
+                        GraphCreator._calculate_edge_feature(timedelta.seconds, 60),
+                        GraphCreator._calculate_edge_feature(timedelta.seconds, 3600),
+                        GraphCreator._calculate_edge_feature(timedelta.seconds, 3600 * 24),
+                        GraphCreator._calculate_edge_feature(timedelta.seconds, 3600 * 24 * 7),
+                    ] + \
+                        # node metric differences
+                        (curr_node_metrics_slice[b] - prev_node_metrics_slice[b]).reshape(-1).tolist()
+                    )
 
         edge_index = torch.tensor(edge_index, dtype=torch.long)
         edge_attr = torch.tensor(edge_attr, dtype=torch.double)
@@ -337,15 +350,17 @@ class GraphCreator(PeronaBaseTransform):
                 if self.col_means is not None:
                     data_df = data_df.fillna(self.col_means)
 
-                for index in range(self.max_graph_size, len(data_df)):
+                for index in range(self.max_predecessors, len(data_df)):
                     # consider only normal executions as predecessor nodes
-                    mask = sub_sub_df.loc[((sub_sub_df.index < index - 1) & (sub_sub_df[self.chaos_col] == 0)) |
-                                          (sub_sub_df.index == index - 1), :].tail(self.max_graph_size).index
+                    mask = sub_sub_df.loc[((sub_sub_df.index < index) & (sub_sub_df[self.chaos_col] == 0)) |
+                                          (sub_sub_df.index == index), :].tail(self.max_predecessors + 1).index
 
-                    if len(mask) < self.min_graph_size:
+                    if len(mask) <= self.min_predecessors:
                         continue
-                    mask = pd.Index(mask.tolist()[:self.min_graph_size-1] + \
-                                    list(range(mask.tolist()[self.min_graph_size-1], index)))
+                    mask_list = mask.tolist()
+                    new_mask_list_tail = list(range(mask_list[self.min_predecessors - 1], mask_list[-1] + 1))
+                    new_mask_list = list(sorted(set(mask_list[:self.min_predecessors] + new_mask_list_tail)))
+                    mask = pd.Index(new_mask_list)
                     
                     data_arr_slice = data_df.iloc[mask, ~data_df.columns.isin(self.all_node_metric_cols)]
                     onehot_arr_slice = data_df.iloc[mask, data_df.columns.isin(self.onehot_cols)]
@@ -359,10 +374,10 @@ class GraphCreator(PeronaBaseTransform):
                         1 / (curr_node_metrics_slice.values + 0.001),
                         date_series_slice, chaos_series_slice)
                     edge_index = edge_index.t().contiguous()
-                    counts = collections.Counter(edge_index[-1].tolist())
+                    counts = collections.Counter(edge_index[1, edge_index[0] != edge_index[1]].tolist())
                     notna_mask = torch.from_numpy(data_arr_slice.columns.isin(self.data_notna_mask_dict[bm_name]))
                     # Result:
-                    # - graph with self.min_graph_size <= x <= self.max_graph_size nodes
+                    # - graph with self.min_predecessors < x < self.max_predecessors predecessor nodes
                     # - only forward connections, edges have attributes regarding time and metrics
                     # - no anomalous nodes as source --> Intention: we assume recordings of normal executions
                     # - in case a new run would be anomalous we would very certainly not add it to dataset!
@@ -375,8 +390,8 @@ class GraphCreator(PeronaBaseTransform):
                                           edge_index=edge_index,
                                           num_predecessors=torch.tensor([counts[key] for key in range(len(data_arr_slice))]),
                                           edge_attr=edge_attr,
-                                          min_graph_size=self.min_graph_size,
-                                          max_graph_size=self.max_graph_size,
+                                          min_predecessors=self.min_predecessors,
+                                          max_predecessors=self.max_predecessors,
                                           # will be removed later
                                           notna_mask=notna_mask)
                     data_list.append(data_obj)
@@ -385,21 +400,25 @@ class GraphCreator(PeronaBaseTransform):
 
 
 class MinMaxScaler(PeronaBaseTransform):
-    def __init__(self, target_property_name: str, target_min: float = 0., target_max: float = 1.):
+    def __init__(self, target_property_name: str, new_target_property_name: Optional[str] = None,
+                 target_min: float = 0., target_max: float = 1.):
         super().__init__()
         self.target_property_name = target_property_name
+        self.new_target_property_name = new_target_property_name or target_property_name
         self.target_min = target_min
         self.target_max = target_max
         self.min_max_scaler = preprocessing.MinMaxScaler(feature_range=(target_min, target_max))
 
     def fit(self, data: PeronaData):
         target_arr: np.ndarray = getattr(data, self.target_property_name).cpu().numpy()
+        target_arr = target_arr if target_arr.ndim >= 2 else target_arr.reshape(-1, 1)
         self.min_max_scaler.partial_fit(target_arr)
         return None
 
     def __call__(self, data: PeronaData):
         target_arr: np.ndarray = getattr(data, self.target_property_name).cpu().numpy()
-        setattr(data, self.target_property_name, torch.from_numpy(self.min_max_scaler.transform(target_arr)))
+        target_arr = target_arr if target_arr.ndim >= 2 else target_arr.reshape(-1, 1)
+        setattr(data, self.new_target_property_name, torch.from_numpy(self.min_max_scaler.transform(target_arr)))
         return data
 
 
@@ -453,7 +472,9 @@ class GraphFinalizer(PeronaBaseTransform):
         all_chaos_combs = all_combs[all_chaos_mask] if chaos_exists else fallback_tensor
         all_chaos_targets = all_targets[all_chaos_mask] if chaos_exists else fallback_tensor
         all_chaos_factors = all_factors[all_chaos_mask] if chaos_exists else fallback_tensor
-
+        
+        predecessors_encoder = OneHotEncoder(sparse=False, categories=[list(range(data.max_predecessors + 1))])
+        onehot_predecessors = predecessors_encoder.fit_transform(np.array(data.num_predecessors.tolist()).reshape(-1, 1))
         # set new properties
         setattr(data, "ranking_indices_all_normal", all_normal_combs)
         setattr(data, "ranking_targets_all_normal", all_normal_targets)
@@ -466,6 +487,8 @@ class GraphFinalizer(PeronaBaseTransform):
         setattr(data, "input_dim", data.x.size(1))
         setattr(data, "edge_dim", data.edge_attr.size(1))
         setattr(data, "output_dim", len(self.bm_types))
+        setattr(data, "onehot_predecessors", torch.from_numpy(onehot_predecessors))
+        setattr(data, "predecessor_dim", data.max_predecessors + 1)
         # delete no longer used property
         delattr(data, "notna_mask")
 

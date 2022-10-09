@@ -23,6 +23,7 @@ from pathlib import Path
 from modeling.transforms import GraphCreator, PeronaCompose, FeatureSelector, MinMaxScaler, FeatureUnifier, \
     GraphFinalizer, FeatureRotator, PeronaData, FeaturePreprocessor
 from orm.models import Benchmark, BenchmarkMetric, NodeMetric
+from config import GeneralConfig
 
 
 def object_as_dict(target_obj):
@@ -47,11 +48,11 @@ class PeronaDataModule(pl.LightningDataModule):
         Path(self.real_artifact_path).absolute().parents[0].mkdir(parents=True, exist_ok=True)
 
         self.batch_size: int = batch_size
-        self.seed: int = kwargs.get("seed", 42)
 
         self.input_dim: Optional[int] = None
         self.edge_dim: Optional[int] = None
         self.output_dim: Optional[int] = None
+        self.predecessor_dim: Optional[int] = None
 
         self.next_pos_sample_count: float = 0
         self.next_neg_sample_count: float = 0
@@ -65,7 +66,7 @@ class PeronaDataModule(pl.LightningDataModule):
             FeaturePreprocessor(),
             FeatureSelector(min_std=0.01),
             FeatureRotator(),
-            GraphCreator(min_graph_size=4, max_graph_size=8),
+            GraphCreator(min_predecessors=3, max_predecessors=7),
             MinMaxScaler(target_property_name="x"),
             MinMaxScaler(target_property_name="edge_attr"),
             GraphFinalizer(),
@@ -176,12 +177,15 @@ class PeronaDataModule(pl.LightningDataModule):
             all_df = pd.read_csv(self.real_artifact_path, parse_dates=["started"])
             if prepare_data_splits:
                 t_path = Path(self.real_artifact_path)
-                if len([f for f in os.listdir(t_path.absolute().parents[0]) if f.startswith(t_path.stem)]) == 1:
+                cond = lambda x: x.startswith(t_path.stem) and not any([x.endswith(o) for o in ["results.csv", "archive.zip"]])
+                if len([f for f in os.listdir(t_path.absolute().parents[0]) if cond(f)]) == 1:
                     self.prepare_data_splits(all_df)
             return copy.deepcopy(all_df)
 
     def prepare_data_splits(self, total_df: pd.DataFrame):
-        np.random.seed(self.seed)
+        # sets seeds for numpy, torch and python.random.
+        pl.seed_everything(GeneralConfig.seed, workers=True)
+        
         all_indices, all_labels = np.arange(len(total_df)), total_df["category"].values
         train_indices, temp, _, _ = train_test_split(all_indices, all_indices, test_size=0.4, train_size=0.6,
                                                      shuffle=True, stratify=all_labels)
@@ -206,7 +210,8 @@ class PeronaDataModule(pl.LightningDataModule):
                 "ranking_margin": predict_list[0].ranking_margin,
                 "input_dim": predict_list[0].input_dim,
                 "edge_dim": predict_list[0].edge_dim,
-                "output_dim": predict_list[0].output_dim
+                "output_dim": predict_list[0].output_dim,
+                "predecessor_dim": predict_list[0].predecessor_dim
             }, json_file)
 
         for obj, the_suffix in zip([train_list, val_list, test_list, self.transform],

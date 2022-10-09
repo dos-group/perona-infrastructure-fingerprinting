@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch_geometric.nn
 from pytorch_metric_learning.distances import CosineSimilarity
 from torch import nn
-from torch_geometric.nn import Sequential, TransformerConv, GraphNorm, TAGConv
+from torch_geometric.nn import Sequential, TransformerConv
 from torch_geometric.utils import dropout_adj
 from pytorch_metric_learning import miners, losses
 from torchvision import ops as O
@@ -41,6 +41,7 @@ class PeronaGraphModel(pl.LightningModule):
         self.hidden_dim: int = kwargs["hidden_dim"]
         self.hidden_dim_mid: int = int(self.hidden_dim * 2)
         self.output_dim: int = kwargs["output_dim"]
+        self.predecessor_dim: int = kwargs["predecessor_dim"]
 
         # we need the following to account for class imbalance
         # --> (used in last linear layer bias init)
@@ -60,6 +61,7 @@ class PeronaGraphModel(pl.LightningModule):
         self.dropout_adj: float = kwargs["dropout_adj"]
         # transformer conv
         self.heads: int = kwargs["heads"]
+        self.concat: int = kwargs["concat"]
         self.beta: bool = kwargs["beta"]
         self.dropout: float = kwargs["dropout"]
         self.edge_dim: int = kwargs["edge_dim"]
@@ -77,23 +79,19 @@ class PeronaGraphModel(pl.LightningModule):
             ("enc_lin2act", nn.SELU())
         ]))
         # message passing
-        self.message_passing = Sequential('x, edge_index, edge_attr, batch, is_training, return_att', collections.OrderedDict([
+        intermediate_dim: int = self.hidden_dim * (self.heads if self.concat else 1)
+        self.message_passing = Sequential('x, edge_index, edge_attr, batch, is_training', collections.OrderedDict([
             ("mp_dropout_adj", (lambda edge_index, edge_attr, is_training: dropout_adj(edge_index, edge_attr=edge_attr,
                                                                                        p=self.dropout_adj,
                                                                                        training=is_training),
                                 'edge_index, edge_attr, is_training -> tmp_edge_index, tmp_edge_attr')),
             ("mp_conv1", (TransformerConv(self.hidden_dim, self.hidden_dim, heads=self.heads, bias=False,
-                                          concat=False, edge_dim=self.edge_dim, dropout=self.dropout,
+                                          concat=self.concat, edge_dim=self.edge_dim, dropout=self.dropout,
                                           beta=self.beta, root_weight=self.root_weight),
-                          'x, tmp_edge_index, tmp_edge_attr, return_attention_weights=return_att -> x1, (_, att_weights)')),
-            ("mp_conv1attmean", (lambda att_weights: att_weights.mean(dim=-1), 'att_weights -> att_weights_mean')),
-            ("mp_conv2", (TAGConv(self.hidden_dim, self.hidden_dim, K=3, bias=False, normalize=False),
-                          'x, tmp_edge_index, edge_weight=att_weights_mean -> x2')),
-            ("mp_convagg", (lambda x, x1, x2: torch.stack([x, x1, x2], dim=0).mean(dim=0), 'x, x1, x2 -> x')),
-            ("mp_convaggact", (nn.SELU(), 'x -> x')),
-            ("mp_convaggdropout", (nn.AlphaDropout(p=self.dropout), 'x -> x')),
-            ("mp_convaggnorm", (GraphNorm(self.hidden_dim), 'x, batch -> x')),
-            ("mp_lin1", (nn.Linear(self.hidden_dim, self.hidden_dim, bias=False), 'x -> x')),
+                          'x, tmp_edge_index, tmp_edge_attr -> x')),
+            ("mp_conv1act", (nn.SELU(), 'x -> x')),
+            ("mp_conv1dropout", (nn.AlphaDropout(p=self.dropout), 'x -> x')),
+            ("mp_lin1", (nn.Linear(intermediate_dim, self.hidden_dim, bias=False), 'x -> x')),
             ("mp_lin1act", (nn.SELU(), 'x -> x')),
             ("mp_return", (lambda x, tmp_edge_index: (x, tmp_edge_index),
                            'x, tmp_edge_index -> x, tmp_edge_index'))
@@ -109,8 +107,9 @@ class PeronaGraphModel(pl.LightningModule):
         # simple linear transformation to obtain logits for classification of benchmark types
         self.classifier = nn.Linear(self.hidden_dim, self.output_dim, bias=True)
         # non-linear transformation to obtain logits for detection of anomalous executions
-        self.cls_chaos1 = nn.Linear(self.output_dim + self.hidden_dim, self.output_dim + self.hidden_dim, bias=True)
-        self.cls_chaos2 = nn.Linear(self.output_dim + self.hidden_dim, 1, bias=True)
+        chaos_dim: int = self.output_dim + self.hidden_dim + self.predecessor_dim
+        self.cls_chaos1 = nn.Linear(chaos_dim, chaos_dim, bias=True)
+        self.cls_chaos2 = nn.Linear(chaos_dim, 1, bias=True)
 
         # init weights / biases of linear layers
         self.apply(init_weights)
@@ -143,13 +142,13 @@ class PeronaGraphModel(pl.LightningModule):
         enc = self.encoder(data.x)
         # 2. message passing of encodings to infer from context
         nxt, mod_e_index = self.message_passing(enc, data.edge_index,
-                                                data.edge_attr, data.batch, self.training, True)
+                                                data.edge_attr, data.batch, self.training)
         
         # the first node of each graph has no precedessors and thus receives no information --> exclusion
         # some nodes might have too few precedessors --> exclusion
         # in case of dropout-adj, some nodes might have no precedessors as well --> exclusion
-        counts = collections.Counter(mod_e_index[-1].tolist())
-        valid_node_indices = [counts[idx] >= data.min_graph_size.max().item() for idx in range(len(data.x))]
+        counts = collections.Counter(mod_e_index[1, mod_e_index[0] != mod_e_index[1]].tolist())
+        valid_node_indices = [counts[idx] >= data.min_predecessors.max().item() for idx in range(len(data.x))]
         # now: what are "valid" nodes and not chaos benchmark executions?
         valid_node_mask: torch.BoolTensor = torch.tensor(valid_node_indices).to(data.chaos)
         not_chaos_mask: torch.BoolTensor = torch.logical_and(valid_node_mask, ~data.chaos)
@@ -167,10 +166,11 @@ class PeronaGraphModel(pl.LightningModule):
         nxt_norm = torch.linalg.vector_norm(nxt, ord=GeneralConfig.vector_norm_ord, dim=-1, keepdim=False)
 
         chaos_logits = self.cls_chaos2(F.selu(self.cls_chaos1(torch.cat([enc - nxt,
+                                                                         data.onehot_predecessors,
                                                                          data.onehot], dim=-1)))).reshape(-1)
         # simplify downstream evaluation
         chaos_logits = (chaos_logits * valid_node_mask.to(torch.long)[:]) + \
-              (torch.logit(data.chaos.detach().clone().to(torch.long)) * (~valid_node_mask).to(torch.long)[:])
+              (torch.logit(data.chaos.detach().clone().to(torch.long), eps=0.01) * (~valid_node_mask).to(torch.long)[:])
 
         # simplify downstream evaluation
         nxt = (nxt * not_chaos_mask.to(torch.long)[:, None]) + \
@@ -179,7 +179,6 @@ class PeronaGraphModel(pl.LightningModule):
         # 5. decode
         enc_dec = self.decoder(enc)
         nxt_dec = self.decoder(nxt)
-        
         
         return enc, enc_norm, enc_dec, enc_cls, nxt, nxt_norm, nxt_dec, nxt_cls, chaos_logits
 
@@ -196,7 +195,6 @@ class PeronaGraphModel(pl.LightningModule):
         decay = set()
         no_decay = set()
         whitelist_weight_modules = (torch.nn.Linear, torch_geometric.nn.Linear,)
-        blacklist_weight_modules = (GraphNorm,)
         for mn, m in self.named_modules():
             for pn, p in m.named_parameters():
                 fpn = '%s.%s' % (mn, pn) if mn else pn  # full param name
@@ -209,9 +207,6 @@ class PeronaGraphModel(pl.LightningModule):
                 elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
                     # weights of whitelist modules will be weight decayed
                     decay.add(fpn)
-                elif any([pn.endswith(opt) for opt in ['weight', 'mean_scale']]) and isinstance(m, blacklist_weight_modules):
-                    # weights of blacklist modules will NOT be weight decayed
-                    no_decay.add(fpn)
 
         # validate that we considered every parameter
         param_dict = {pn: p for pn, p in self.named_parameters()}

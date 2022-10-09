@@ -8,11 +8,14 @@ class GeneralConfig(object):
     result_dir: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
     best_checkpoint_dir: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_checkpoints")
     vector_norm_ord: int = 10
+    gradient_clip_val: float = 1.0
+    gradient_clip_algorithm: str = "norm"
+    seed: int = 42
 
 
 class TuneConfig(object):
     scheduler: dict = {
-        "grace_period": 50,
+        "grace_period": 25,
         "reduction_factor": 4
     }
     cli_reporter: dict = {
@@ -40,8 +43,12 @@ class TuneConfig(object):
     concurrency_limiter: dict = {
         "max_concurrent": 4
     }
-    optuna_search: dict = {}
+    optuna_search: dict = {
+        "seed": GeneralConfig.seed
+    }
     search_space: dict = {
+        # seed config
+        "seed": tune.randint(0, 10000),
         # data config
         "batch_size": tune.choice([16]),
         # model config
@@ -49,6 +56,7 @@ class TuneConfig(object):
         # refer to: https://pytorch-geometric.readthedocs.io/en/2.0.4/modules/nn.html#torch_geometric.nn.conv.TransformerConv
         "hidden_dim": tune.choice([32]),
         "heads": tune.choice([1, 3, 5]),
+        "concat": tune.choice([False, True]),
         "beta": tune.choice([False, True]),
         "dropout": tune.choice([0.0, 0.1, 0.2]),
         "root_weight": tune.choice([False, True]),
