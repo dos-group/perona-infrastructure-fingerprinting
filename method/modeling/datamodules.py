@@ -54,8 +54,8 @@ class PeronaDataModule(pl.LightningDataModule):
         self.output_dim: Optional[int] = None
         self.predecessor_dim: Optional[int] = None
 
-        self.next_pos_sample_count: float = 0
-        self.next_neg_sample_count: float = 0
+        self.pos_sample_count: float = 0
+        self.neg_sample_count: float = 0
         self.ranking_margin: float = 0
         self.train_data: List[PeronaData] = []
         self.valid_data: List[PeronaData] = []
@@ -199,14 +199,14 @@ class PeronaDataModule(pl.LightningDataModule):
         test_list = self.transform([copy.deepcopy(total_df.iloc[test_indices])])
         predict_list = self.transform([copy.deepcopy(total_df)])
 
-        next_class_targets = torch.cat([el.chaos[1:] for el in predict_list], dim=-1)
-        next_pos_sample_count: float = torch.sum(next_class_targets).item()
-        next_neg_sample_count: float = len(next_class_targets) - next_pos_sample_count
+        class_targets = torch.cat([el.chaos for el in predict_list], dim=-1)
+        pos_sample_count: float = torch.sum(class_targets).item()
+        neg_sample_count: float = len(class_targets) - pos_sample_count
 
         with open(re.sub(r"\.csv$", "_config.json", self.real_artifact_path), "w") as json_file:
             json.dump({
-                "next_neg_sample_count": next_neg_sample_count,
-                "next_pos_sample_count": next_pos_sample_count,
+                "neg_sample_count": neg_sample_count,
+                "pos_sample_count": pos_sample_count,
                 "ranking_margin": predict_list[0].ranking_margin,
                 "input_dim": predict_list[0].input_dim,
                 "edge_dim": predict_list[0].edge_dim,

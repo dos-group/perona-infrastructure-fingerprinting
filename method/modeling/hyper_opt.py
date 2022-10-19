@@ -24,9 +24,7 @@ from modeling.models import PeronaGraphModel
 from pytorch_lightning.utilities.warnings import PossibleUserWarning, LightningDeprecationWarning
 import warnings
 
-metric_columns: List[str] = ["val_loss",
-                             "val_chaos_acc", "val_chaos_rec", "val_chaos_pre", "val_chaos_f1s",
-                             "val_this_mse", "val_this_acc", "val_next_mse", "val_next_acc"]
+metric_columns: List[str] = ["loss", "enc_mse", "enc_acc", "chaos_acc", "chaos_rec", "chaos_pre", "chaos_f1s"]
 
 
 class HyperOptimizer(object):
@@ -97,18 +95,15 @@ class HyperOptimizer(object):
         with torch.no_grad():
             for batch_idx, batch in enumerate(DataLoader(inf_list, batch_size=batch_size, shuffle=False)):
                 batch = batch.to(model.device)
-                enc, enc_norm, enc_dec, enc_cls, nxt, nxt_norm, nxt_dec, nxt_cls, chaos_logits = model(batch)
+                enc, enc_norm, enc_dec, enc_cls, chaos_logits, valid_node_mask = model(batch)
                 # get raw embeddings
                 output_dict: dict = {
                     "inf_enc": enc,
                     "inf_enc_norm": enc_norm,
                     "inf_enc_dec": enc_dec,
                     "inf_enc_cls": enc_cls,
-                    "inf_nxt": nxt,
-                    "inf_nxt_norm": nxt_norm,
-                    "inf_nxt_dec": nxt_dec,
-                    "inf_nxt_cls": nxt_cls,
-                    "inf_chaos_logits": chaos_logits
+                    "inf_chaos_logits": chaos_logits,
+                    "inf_valid_node_mask": valid_node_mask
                 }
                 for node_idx in range(len(enc)):
                     intermediate_dict = {"batch_idx": batch_idx, "node_idx": node_idx}
@@ -218,8 +213,8 @@ class HyperOptimizer(object):
             "output_dim": datamodule.output_dim,
             "predecessor_dim": datamodule.predecessor_dim,
             "ranking_margin": datamodule.ranking_margin,
-            "next_neg_sample_count": datamodule.next_neg_sample_count,
-            "next_pos_sample_count": datamodule.next_pos_sample_count
+            "neg_sample_count": datamodule.neg_sample_count,
+            "pos_sample_count": datamodule.pos_sample_count
         }
         
         # config["seed"] is set deterministically, but differs between training runs
@@ -229,7 +224,7 @@ class HyperOptimizer(object):
         model = PeronaGraphModel(**{**fixed_model_args, **config}).double().to(device)
         print(ModelSummary(model, max_depth=-1), "\n")
 
-        tune_callback = TuneReportCheckpointCallback(metrics={v: f"ptl/{v}" for v in metric_columns},
+        tune_callback = TuneReportCheckpointCallback(metrics={v: f"ptl/val_{v}" for v in metric_columns},
                                                      filename="checkpoint",
                                                      on="validation_end")
         swa_callback = StochasticWeightAveraging(swa_lrs=1e-2)
