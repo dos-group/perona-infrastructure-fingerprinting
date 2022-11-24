@@ -8,6 +8,9 @@ class GeneralConfig(object):
     result_dir: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
     best_checkpoint_dir: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_checkpoints")
     vector_norm_ord: int = 10
+    gradient_clip_val: float = 1.0
+    gradient_clip_algorithm: str = "norm"
+    seed: int = 42
 
 
 class TuneConfig(object):
@@ -30,7 +33,7 @@ class TuneConfig(object):
         "mode": "min",
         "metric": "val_loss",
         "checkpoint_score_attr": "min-val_loss",
-        "keep_checkpoints_num": 3,
+        "keep_checkpoints_num": 2,
         "verbose": 1,
         "num_samples": 100,
         "max_failures": -1,
@@ -40,8 +43,12 @@ class TuneConfig(object):
     concurrency_limiter: dict = {
         "max_concurrent": 4
     }
-    optuna_search: dict = {}
+    optuna_search: dict = {
+        "seed": GeneralConfig.seed
+    }
     search_space: dict = {
+        # seed config
+        "seed": tune.randint(0, 10000),
         # data config
         "batch_size": tune.choice([16]),
         # model config
@@ -57,8 +64,6 @@ class TuneConfig(object):
         "focal_gamma": tune.choice([0.5, 1.0, 2.0, 5.0]),
         # --> (controls class-balanced loss, same range as in https://arxiv.org/pdf/1901.05555.pdf)
         "classbalanced_beta": tune.choice([0.9, 0.99, 0.999, 0.9999]),
-        # --> (controls marginranking loss)
-        "ranking_margin_factor": tune.choice([1, 2, 4, 8]),
         # optimizer config
         "learning_rate": tune.choice([0.1, 0.01, 0.001]),
         "weight_decay": tune.choice([0.01, 0.001, 0.0001])

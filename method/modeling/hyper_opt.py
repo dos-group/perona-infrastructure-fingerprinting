@@ -5,7 +5,10 @@ import torch
 import logging
 import time
 import pandas as pd
+import numpy as np
+import random
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import StochasticWeightAveraging
 from pytorch_lightning.strategies import SingleDeviceStrategy
 from pytorch_lightning.utilities.model_summary import ModelSummary
 from ray import tune
@@ -23,9 +26,7 @@ from modeling.models import PeronaGraphModel
 from pytorch_lightning.utilities.warnings import PossibleUserWarning, LightningDeprecationWarning
 import warnings
 
-metric_columns: List[str] = ["val_loss", "val_loss_curr",
-                             "val_chaos_acc", "val_chaos_rec", "val_chaos_pre", "val_chaos_f1s",
-                             "val_this_mse", "val_this_acc", "val_next_mse", "val_next_acc"]
+metric_columns: List[str] = ["val_loss", "loss_curr", "enc_mse", "enc_acc", "nxt_mse", "nxt_acc"]
 
 
 class HyperOptimizer(object):
@@ -38,6 +39,9 @@ class HyperOptimizer(object):
         return pl.Trainer(strategy=strategy,
                           enable_progress_bar=False,
                           log_every_n_steps=1000,  # we don't want this intermediate logging
+                          # clip gradients' global norm to <='gradient_clip_val' using 'gradient_clip_algorithm'
+                          gradient_clip_val=GeneralConfig.gradient_clip_val,
+                          gradient_clip_algorithm=GeneralConfig.gradient_clip_algorithm,
                           **kwargs)
 
     @staticmethod
@@ -93,28 +97,31 @@ class HyperOptimizer(object):
         with torch.no_grad():
             for batch_idx, batch in enumerate(DataLoader(inf_list, batch_size=batch_size, shuffle=False)):
                 batch = batch.to(model.device)
-                enc, enc_norm, dec_enc, cls_enc, nxt, nxt_norm, dec_nxt, cls_nxt, chaos_logits = model(batch)
+                enc, enc_norm, enc_dec, enc_cls, nxt, nxt_norm, nxt_dec, nxt_cls, chaos_logits, valid_node_mask = model(batch)
                 # get raw embeddings
                 output_dict: dict = {
                     "inf_enc": enc,
                     "inf_enc_norm": enc_norm,
-                    "inf_dec_enc": dec_enc,
-                    "inf_cls_enc": cls_enc,
+                    "inf_enc_dec": enc_dec,
+                    "inf_enc_cls": enc_cls,
                     "inf_nxt": nxt,
                     "inf_nxt_norm": nxt_norm,
-                    "inf_dec_nxt": dec_nxt,
-                    "inf_cls_nxt": cls_nxt,
-                    "inf_chaos_logits": chaos_logits
+                    "inf_nxt_dec": nxt_dec,
+                    "inf_nxt_cls": nxt_cls,
+                    "inf_chaos_logits": chaos_logits,
+                    "inf_valid_node_mask": valid_node_mask
                 }
                 for node_idx in range(len(enc)):
                     intermediate_dict = {"batch_idx": batch_idx, "node_idx": node_idx}
                     temp_dict = {**batch.to_dict(), **output_dict}
+                    batch_size = len(temp_dict["batch"].unique())
                     for k, v in temp_dict.items():
                         if any([k.startswith(opt) for opt in ["edge_index", "edge_attr", "input_dim",
                                                               "edge_dim", "output_dim", "ptr", "ranking_"]]):
                             continue
-                        intermediate_dict[k] = v[node_idx].tolist() if torch.is_tensor(v) \
-                            else v[temp_dict["batch"][node_idx]]
+                        resp = v[temp_dict["batch"][node_idx]] if len(v) == batch_size else v[node_idx]
+                        resp = resp.tolist() if torch.is_tensor(resp) else resp
+                        intermediate_dict[k] = resp
                     result_list.append(intermediate_dict)
         return pd.DataFrame(result_list)
 
@@ -148,6 +155,9 @@ class HyperOptimizer(object):
             search_alg, **concurrency_limiter_config)
 
         tune_run_name = f"{hyperoptimizer_instance.job_identifier}_{exp_suffix}"
+        
+        # sets seeds for numpy, torch and python.random.
+        pl.seed_everything(GeneralConfig.seed, workers=True)
 
         start = time.time()
 
@@ -207,16 +217,24 @@ class HyperOptimizer(object):
             "input_dim": datamodule.input_dim,
             "edge_dim": datamodule.edge_dim,
             "output_dim": datamodule.output_dim,
-            "ranking_margin": datamodule.ranking_margin,
-            "next_neg_sample_count": datamodule.next_neg_sample_count,
-            "next_pos_sample_count": datamodule.next_pos_sample_count
+            "neg_sample_count": datamodule.neg_sample_count,
+            "pos_sample_count": datamodule.pos_sample_count
         }
+        
+        # config["seed"] is set deterministically, but differs between training runs
+        # sets seeds for numpy, torch and python.random.
+        np.random.seed(config["seed"])
+        torch.manual_seed(config["seed"])
+        random.seed(config["seed"])
+        
         model = PeronaGraphModel(**{**fixed_model_args, **config}).double().to(device)
         print(ModelSummary(model, max_depth=-1), "\n")
 
-        tune_callback = TuneReportCheckpointCallback(metrics={v: f"ptl/{v}" for v in metric_columns},
-                                                     filename="checkpoint",
-                                                     on="validation_end")
+        tune_callback = TuneReportCheckpointCallback(
+            metrics={v: f"ptl/{'val_' * bool(1 - ('val_' in v))}{v}" for v in metric_columns},
+            filename="checkpoint",
+            on="validation_end")
+        swa_callback = StochasticWeightAveraging(swa_lrs=1e-2)
 
         resume_from_checkpoint = os.path.join(checkpoint_dir, "checkpoint") if checkpoint_dir is not None else None
         
@@ -224,6 +242,6 @@ class HyperOptimizer(object):
                                                       gpus=num_gpus,
                                                       resume_from_checkpoint=resume_from_checkpoint,
                                                       max_epochs=num_epochs,
-                                                      callbacks=[tune_callback])
+                                                      callbacks=[tune_callback, swa_callback])
 
         trainer.fit(model, datamodule=datamodule)
