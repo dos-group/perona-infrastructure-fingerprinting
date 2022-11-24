@@ -15,7 +15,7 @@ class GeneralConfig(object):
 
 class TuneConfig(object):
     scheduler: dict = {
-        "grace_period": 25,
+        "grace_period": 50,
         "reduction_factor": 4
     }
     cli_reporter: dict = {
@@ -33,7 +33,7 @@ class TuneConfig(object):
         "mode": "min",
         "metric": "val_loss",
         "checkpoint_score_attr": "min-val_loss",
-        "keep_checkpoints_num": 3,
+        "keep_checkpoints_num": 2,
         "verbose": 1,
         "num_samples": 100,
         "max_failures": -1,
@@ -56,17 +56,14 @@ class TuneConfig(object):
         # refer to: https://pytorch-geometric.readthedocs.io/en/2.0.4/modules/nn.html#torch_geometric.nn.conv.TransformerConv
         "hidden_dim": tune.choice([32]),
         "heads": tune.choice([1, 3, 5]),
-        "concat": tune.choice([False, True]),
         "beta": tune.choice([False, True]),
         "dropout": tune.choice([0.0, 0.1, 0.2]),
         "root_weight": tune.choice([False, True]),
         # loss config
-        # --> (controls focal loss)
-        "focal_gamma": tune.choice([2]),
-        # --> (controls class-balanced loss)
-        "classbalanced_beta": tune.choice([0.9999]),
-        # --> (controls marginranking loss)
-        "ranking_margin_factor": tune.choice([4]),
+        # --> (controls focal loss, almost same range as in https://arxiv.org/pdf/1901.05555.pdf)
+        "focal_gamma": tune.choice([0.5, 1.0, 2.0, 5.0]),
+        # --> (controls class-balanced loss, same range as in https://arxiv.org/pdf/1901.05555.pdf)
+        "classbalanced_beta": tune.choice([0.9, 0.99, 0.999, 0.9999]),
         # optimizer config
         "learning_rate": tune.choice([0.1, 0.01, 0.001]),
         "weight_decay": tune.choice([0.01, 0.001, 0.0001])

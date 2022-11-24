@@ -6,7 +6,7 @@ import io
 from datetime import timedelta
 
 import dill
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
@@ -56,7 +56,8 @@ class PeronaDataModule(pl.LightningDataModule):
 
         self.pos_sample_count: float = 0
         self.neg_sample_count: float = 0
-        self.ranking_margin: float = 0
+        self.ranking_margins_std: Dict[str, float] = {}
+        self.ranking_margins_var: Dict[str, float] = {}
         self.train_data: List[PeronaData] = []
         self.valid_data: List[PeronaData] = []
         self.test_data: List[PeronaData] = []
@@ -66,7 +67,7 @@ class PeronaDataModule(pl.LightningDataModule):
             FeaturePreprocessor(),
             FeatureSelector(min_std=0.01),
             FeatureRotator(),
-            GraphCreator(min_predecessors=3, max_predecessors=7),
+            GraphCreator(min_predecessors=3, max_predecessors=3),
             MinMaxScaler(target_property_name="x"),
             MinMaxScaler(target_property_name="edge_attr"),
             GraphFinalizer(),
@@ -198,8 +199,8 @@ class PeronaDataModule(pl.LightningDataModule):
         val_list = self.transform([copy.deepcopy(total_df.iloc[val_indices])])
         test_list = self.transform([copy.deepcopy(total_df.iloc[test_indices])])
         predict_list = self.transform([copy.deepcopy(total_df)])
-
-        class_targets = torch.cat([el.chaos for el in predict_list], dim=-1)
+        
+        class_targets = torch.cat([el.chaos[el.num_predecessors >= el.min_predecessors] for el in predict_list], dim=-1)
         pos_sample_count: float = torch.sum(class_targets).item()
         neg_sample_count: float = len(class_targets) - pos_sample_count
 
@@ -207,7 +208,8 @@ class PeronaDataModule(pl.LightningDataModule):
             json.dump({
                 "neg_sample_count": neg_sample_count,
                 "pos_sample_count": pos_sample_count,
-                "ranking_margin": predict_list[0].ranking_margin,
+                "ranking_margins_std": predict_list[0].ranking_margins_std,
+                "ranking_margins_var": predict_list[0].ranking_margins_var,
                 "input_dim": predict_list[0].input_dim,
                 "edge_dim": predict_list[0].edge_dim,
                 "output_dim": predict_list[0].output_dim,

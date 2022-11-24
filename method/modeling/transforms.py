@@ -299,10 +299,10 @@ class GraphCreator(PeronaBaseTransform):
                         (curr_node_metrics_slice[a] - prev_node_metrics_slice[a]).reshape(-1).tolist() + [
                         # spatial distance
                         1 / 2 ** (b - a),
-                        # has the previous execution be anomalous?
-                        chaos_series_slice.iloc[b-1],
+                        # has the previous execution been anomalous?
+                        -1 if b == 0 else chaos_series_slice.iloc[b-1],
                         # how many anomalies in-between?
-                        cumsum_chaos_series_slice.iloc[b-1] - cumsum_chaos_series_slice.iloc[a],
+                        -1 if a == b else (cumsum_chaos_series_slice.iloc[b-1] - cumsum_chaos_series_slice.iloc[a]),
                         # time-related features
                         GraphCreator._calculate_edge_feature(timedelta.seconds, 60),
                         GraphCreator._calculate_edge_feature(timedelta.seconds, 3600),
@@ -357,10 +357,6 @@ class GraphCreator(PeronaBaseTransform):
 
                     if len(mask) <= self.min_predecessors:
                         continue
-                    mask_list = mask.tolist()
-                    new_mask_list_tail = list(range(mask_list[self.min_predecessors - 1], mask_list[-1] + 1))
-                    new_mask_list = list(sorted(set(mask_list[:self.min_predecessors] + new_mask_list_tail)))
-                    mask = pd.Index(new_mask_list)
                     
                     data_arr_slice = data_df.iloc[mask, ~data_df.columns.isin(self.all_node_metric_cols)]
                     onehot_arr_slice = data_df.iloc[mask, data_df.columns.isin(self.onehot_cols)]
@@ -427,23 +423,27 @@ class GraphFinalizer(PeronaBaseTransform):
     def __init__(self, *args, **kwargs):
         super().__init__()
         self.bm_types = set()
-        self.norm_std_dict: Dict[str, List[float]] = {}
+        self.norm_dict: Dict[str, List[float]] = {}
 
     def fit(self, data: PeronaData):
-        dict_key: str = "_".join([data.bm_name, data.node_name])
+        dict_key: str = "_".join([data.bm_name])
         x_norm = torch.linalg.vector_norm(data.x[~data.chaos][:, data.notna_mask],
                                           ord=GeneralConfig.vector_norm_ord, dim=-1)
-        self.norm_std_dict[dict_key] = self.norm_std_dict.get(dict_key, []) + x_norm.tolist()
+        self.norm_dict[dict_key] = self.norm_dict.get(dict_key, []) + x_norm.tolist()
 
         self.bm_types.add(data.bm_name)
         return None
 
     def __call__(self, data: PeronaData):
+        dict_key: str = "_".join([data.bm_name])
         x_norm = torch.linalg.vector_norm(data.x[:, data.notna_mask], ord=GeneralConfig.vector_norm_ord, dim=-1)
+        min_norms = collections.OrderedDict(sorted([(k, np.amin(np.array(v))) for k, v in self.norm_dict.items()]))
+        ranking_margins_std = collections.OrderedDict(sorted([(k, np.array(v).std()) for k, v in self.norm_dict.items()]))
+        ranking_margins_var = collections.OrderedDict(sorted([(k, np.array(v).var()) for k, v in self.norm_dict.items()]))
         
         # all valid combinations and associated targets
         all_perms: List[Tuple[int, int]] = list(permutations(range(len(data.x)), 2))
-        all_combs: torch.LongTensor = torch.tensor(all_perms).reshape(-1, 2).to(torch.long)
+        all_combs: torch.LongTensor = torch.tensor(all_perms).reshape(-1, 2).to(torch.long).squeeze(0)
         all_targets: torch.Tensor = torch.sign(x_norm[all_combs[:, 0]] - x_norm[all_combs[:, 1]])
         all_factors: torch.Tensor = x_norm[all_combs[:, 0]] / x_norm[all_combs[:, 1]]
         all_mask: torch.BoolTensor = all_targets != 0
@@ -451,7 +451,7 @@ class GraphFinalizer(PeronaBaseTransform):
         all_targets = all_targets[all_mask]
         all_factors = all_factors[all_mask]
 
-        # Does chaos exist? What is the id of the last node? What is the default return value?
+        # Does chaos exist? What are the indices of chaos nodes? What is the default return value?
         chaos_exists = bool(data.chaos.sum())
         chaos_indices = data.chaos.nonzero()
         not_chaos_indices = (~data.chaos).nonzero()
@@ -466,12 +466,32 @@ class GraphFinalizer(PeronaBaseTransform):
         all_normal_factors = all_factors[all_normal_mask] if chaos_exists else all_factors
 
         # for all_chaos:
-        all_chaos_mask: Optional[torch.Tensor]
+        chaos_resolver = {
+            "True:True":  lambda target, orig_factor, comp_factor: (target, orig_factor),
+            "True:False": lambda target, orig_factor, comp_factor: (-1, comp_factor),
+            "False:True": lambda target, orig_factor, comp_factor: (1, 1 / comp_factor),
+        }
+        all_chaos_combs = fallback_tensor # all_combs[all_chaos_mask] if chaos_exists else fallback_tensor
+        all_chaos_targets = fallback_tensor # all_targets[all_chaos_mask] if chaos_exists else fallback_tensor
+        all_chaos_factors = fallback_tensor # all_factors[all_chaos_mask] if chaos_exists else fallback_tensor
         if chaos_exists:
             all_chaos_mask = torch.logical_or(*[sum(all_combs[:, i]==c_i for c_i in chaos_indices) for i in [0, 1]])
-        all_chaos_combs = all_combs[all_chaos_mask] if chaos_exists else fallback_tensor
-        all_chaos_targets = all_targets[all_chaos_mask] if chaos_exists else fallback_tensor
-        all_chaos_factors = all_factors[all_chaos_mask] if chaos_exists else fallback_tensor
+            all_chaos_combs = all_combs[all_chaos_mask]
+            
+            all_chaos_tuples_list = []
+            for idx, has_chaos in enumerate(all_chaos_mask):
+                if not has_chaos:
+                    continue
+                chaos_comb, chaos_target, chaos_factor = [s[idx] for s in [all_combs, all_targets, all_factors]]
+                comp_norm = max([x_norm[comb_idx] for comb_idx in chaos_comb.tolist()])
+                ref_value = min_norms[dict_key] - ranking_margins_std[dict_key]
+                comp_factor = min(comp_norm / ref_value, ref_value / comp_norm)
+                resolver_key = ":".join([str(comb_idx in chaos_indices) for comb_idx in chaos_comb.tolist()])
+                all_chaos_tuples_list.append(chaos_resolver[resolver_key](chaos_target, chaos_factor, comp_factor))
+                
+            all_chaos_targets_list, all_chaos_factors_list = zip(*all_chaos_tuples_list)
+            all_chaos_targets = torch.tensor(all_chaos_targets_list).to(all_targets)
+            all_chaos_factors = torch.tensor(all_chaos_factors_list).to(all_factors)
         
         predecessors_encoder = OneHotEncoder(sparse=False, categories=[list(range(data.max_predecessors + 1))])
         onehot_predecessors = predecessors_encoder.fit_transform(np.array(data.num_predecessors.tolist()).reshape(-1, 1))
@@ -482,7 +502,8 @@ class GraphFinalizer(PeronaBaseTransform):
         setattr(data, "ranking_indices_all_chaos", all_chaos_combs)
         setattr(data, "ranking_targets_all_chaos", all_chaos_targets)
         setattr(data, "ranking_factors_all_chaos", all_chaos_factors)
-        setattr(data, "ranking_margin", max([np.array(v_l).std() for v_l in self.norm_std_dict.values()]))
+        setattr(data, "ranking_margins_std", ranking_margins_std)
+        setattr(data, "ranking_margins_var", ranking_margins_var)
         setattr(data, "x_norm", x_norm)
         setattr(data, "input_dim", data.x.size(1))
         setattr(data, "edge_dim", data.edge_attr.size(1))

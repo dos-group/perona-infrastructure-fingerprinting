@@ -5,6 +5,8 @@ import torch
 import logging
 import time
 import pandas as pd
+import numpy as np
+import random
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import StochasticWeightAveraging
 from pytorch_lightning.strategies import SingleDeviceStrategy
@@ -24,7 +26,7 @@ from modeling.models import PeronaGraphModel
 from pytorch_lightning.utilities.warnings import PossibleUserWarning, LightningDeprecationWarning
 import warnings
 
-metric_columns: List[str] = ["loss", "enc_mse", "enc_acc", "chaos_acc", "chaos_rec", "chaos_pre", "chaos_f1s"]
+metric_columns: List[str] = ["val_loss", "loss_curr", "enc_mse", "enc_acc", "nxt_mse", "nxt_acc"]
 
 
 class HyperOptimizer(object):
@@ -95,13 +97,17 @@ class HyperOptimizer(object):
         with torch.no_grad():
             for batch_idx, batch in enumerate(DataLoader(inf_list, batch_size=batch_size, shuffle=False)):
                 batch = batch.to(model.device)
-                enc, enc_norm, enc_dec, enc_cls, chaos_logits, valid_node_mask = model(batch)
+                enc, enc_norm, enc_dec, enc_cls, nxt, nxt_norm, nxt_dec, nxt_cls, chaos_logits, valid_node_mask = model(batch)
                 # get raw embeddings
                 output_dict: dict = {
                     "inf_enc": enc,
                     "inf_enc_norm": enc_norm,
                     "inf_enc_dec": enc_dec,
                     "inf_enc_cls": enc_cls,
+                    "inf_nxt": nxt,
+                    "inf_nxt_norm": nxt_norm,
+                    "inf_nxt_dec": nxt_dec,
+                    "inf_nxt_cls": nxt_cls,
                     "inf_chaos_logits": chaos_logits,
                     "inf_valid_node_mask": valid_node_mask
                 }
@@ -211,22 +217,23 @@ class HyperOptimizer(object):
             "input_dim": datamodule.input_dim,
             "edge_dim": datamodule.edge_dim,
             "output_dim": datamodule.output_dim,
-            "predecessor_dim": datamodule.predecessor_dim,
-            "ranking_margin": datamodule.ranking_margin,
             "neg_sample_count": datamodule.neg_sample_count,
             "pos_sample_count": datamodule.pos_sample_count
         }
         
         # config["seed"] is set deterministically, but differs between training runs
         # sets seeds for numpy, torch and python.random.
-        pl.seed_everything(config["seed"], workers=True)
+        np.random.seed(config["seed"])
+        torch.manual_seed(config["seed"])
+        random.seed(config["seed"])
         
         model = PeronaGraphModel(**{**fixed_model_args, **config}).double().to(device)
         print(ModelSummary(model, max_depth=-1), "\n")
 
-        tune_callback = TuneReportCheckpointCallback(metrics={v: f"ptl/val_{v}" for v in metric_columns},
-                                                     filename="checkpoint",
-                                                     on="validation_end")
+        tune_callback = TuneReportCheckpointCallback(
+            metrics={v: f"ptl/{'val_' * bool(1 - ('val_' in v))}{v}" for v in metric_columns},
+            filename="checkpoint",
+            on="validation_end")
         swa_callback = StochasticWeightAveraging(swa_lrs=1e-2)
 
         resume_from_checkpoint = os.path.join(checkpoint_dir, "checkpoint") if checkpoint_dir is not None else None

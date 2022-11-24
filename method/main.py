@@ -78,6 +78,7 @@ print(loc_summary_df.num_predecessors.value_counts())
 
 for selector in ["ALL"] + loc_summary_df.num_predecessors.unique().tolist():
     mask = loc_summary_df.num_predecessors >= loc_summary_df.min_predecessors.max()
+    mask = mask & loc_summary_df.inf_valid_node_mask
     if selector != "ALL":
         mask = mask & (loc_summary_df.num_predecessors == selector)
     df_view = copy.deepcopy(loc_summary_df.loc[mask, :])
@@ -94,6 +95,7 @@ for selector in ["ALL"] + loc_summary_df.num_predecessors.unique().tolist():
     
 for selector in ["ALL"] + loc_summary_df.num_predecessors.unique().tolist():
     mask = loc_summary_df.num_predecessors >= loc_summary_df.min_predecessors.max()
+    mask = mask & loc_summary_df.inf_valid_node_mask
     if selector != "ALL":
         mask = mask & (loc_summary_df.num_predecessors == selector)
     df_view = copy.deepcopy(loc_summary_df.loc[mask, :])
