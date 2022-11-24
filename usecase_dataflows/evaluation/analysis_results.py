@@ -47,12 +47,10 @@ df = pd.concat((
     arrow_ext,
 ), axis=0, ignore_index=True)
 
-df = df[(df["iteration"] == 1) | (df["iteration"] == 5) | (df["iteration"] == 9)]
-df = df[(df["percentile"] == 10) | (df["percentile"] == 50) | (df["percentile"] == 90)]
-
-df["approach"] = "Perona: no"
-df.loc[(df["identifier"] == "ArrowExtOptimizer"), "approach"] = "Perona: yes"
-df.loc[(df["identifier"] == "CherryPickExtOptimizer"), "approach"] = "Perona: yes"
+df.loc[(df["identifier"] == "ArrowOptimizer"), "approach"] = "Arrow"
+df.loc[(df["identifier"] == "CherryPickOptimizer"), "approach"] = "CherryPick"
+df.loc[(df["identifier"] == "ArrowExtOptimizer"), "approach"] = "Arrow w/ Perona"
+df.loc[(df["identifier"] == "CherryPickExtOptimizer"), "approach"] = "CherryPick w/ Perona"
 
 sns.set_style("whitegrid")
 
@@ -70,68 +68,19 @@ sns.boxplot(data=df[df["optimizer_strategy_sub"] == "AugmentedBO"], x="profiling
 lim = (1, 2.5)
 
 ax1.set_ylim(lim)
-ax1.get_legend().remove()
 ax1.set_ylabel("Difference to optimal cost")
 ax1.set_yticks([1, 1.25, 1.5, 1.75, 2, 2.25, 2.5])
 ax1.set_yticklabels(["0%", "25%", "50%", "75%", "100%", "125%", "150%"])
 ax1.set_xlabel("")
 ax1.set_title("NaiveBO (CherryPick)")
+handles, labels = ax1.get_legend_handles_labels()
+ax1.legend(handles=handles, labels=labels)
 
 ax2.set_ylim(lim)
-ax2.get_legend().remove()
 ax2.set_ylabel("Difference to optimal cost")
 ax2.set_xlabel("Number of profiling runs")
 ax2.set_title("AugmentedBO (Arrow)")
-
-handles, labels = ax1.get_legend_handles_labels()
-f.legend(handles, labels, loc='upper right', bbox_to_anchor=(0.96, 0.97), framealpha=1, edgecolor="white")
+handles, labels = ax2.get_legend_handles_labels()
+ax2.legend(handles=handles, labels=labels)
 
 plt.savefig(os.path.join(root_dir, "artifacts", "usecase_dataflows1.pdf"), dpi=300, bbox_inches='tight')
-
-### Use Case Dataflows: Figure 2
-
-df2 = df[(df["optimizer_strategy_sub"] == "NaiveBO")]
-g = df2.groupby(by=["framework_name", "algorithm_name", "dataset_name", "percentile", "iteration", "approach"])
-y = cost_and_time_df(g, "approach")
-
-f, (ax1, ax2, ax3, ax4) = plt.subplots(nrows=4, ncols=1, figsize=(5, 4))
-f.tight_layout(h_pad=2, w_pad=0)
-
-sns.boxplot(data=y, y="approach", x="total_search_time", ax=ax1,
-            order=["Perona: no", "Perona: yes"],
-            showfliers=False, palette=["#968D88", *sns.color_palette("flare")[:1]])
-
-sns.boxplot(data=y, y="approach", x="total_search_cost", ax=ax2,
-            order=["Perona: no", "Perona: yes"],
-            showfliers=False, palette=["#968D88", *sns.color_palette("flare")[:1]])
-
-sns.boxplot(data=y, y="approach", x="best_cost_found", ax=ax3,
-            order=["Perona: no", "Perona: yes"],
-            showfliers=False,
-            palette=["#968D88", *sns.color_palette("flare")[:1]])
-
-sns.barplot(data=y, y="approach", x="timeout", ax=ax4,
-            order=["Perona: no", "Perona: yes"],
-            ci=None, palette=["#968D88", *sns.color_palette("flare")[:1]])
-
-ax1.set_ylabel("")
-ax1.set_xlabel("Total search time (hours)")
-ax1.set_xlim((0, 8 * 3600))
-ax1.set_xticks([3600 * i for i in range(9)])
-ax1.set_xticklabels([f"{i}" for i in range(9)])
-
-ax2.set_ylabel("")
-ax2.set_xlabel("Total search cost ($)")
-ax2.set_xlim((0, 11))
-
-ax3.set_ylabel("")
-ax3.set_xlabel("Best cost (normalized)")
-ax3.set_xlim((1, 1.82))
-
-ax4.set_ylabel("")
-ax4.set_xlabel("Percentage of profiling runs with timeout")  # timeout
-ax4.set_xlim((0, 0.06))
-ax4.set_xticks([0, .01, .02, .03, .04, .05, .06])
-ax4.set_xticklabels(["0%", "1%", "2%", "3%", "4%", "5%", "6%"])
-
-plt.savefig(os.path.join(root_dir, "artifacts", "usecase_dataflows2.pdf"), dpi=300, bbox_inches='tight')
