@@ -467,13 +467,13 @@ class GraphFinalizer(PeronaBaseTransform):
 
         # for all_chaos:
         chaos_resolver = {
-            "True:True":  lambda target, orig_factor, comp_factor: (target, orig_factor),
-            "True:False": lambda target, orig_factor, comp_factor: (-1, comp_factor),
-            "False:True": lambda target, orig_factor, comp_factor: (1, 1 / comp_factor),
+            "True:True": lambda target, orig_factor, c_factor: (target, orig_factor),
+            "True:False": lambda target, orig_factor, c_factor: (-1, c_factor),
+            "False:True": lambda target, orig_factor, c_factor: (1, 1 / c_factor),
         }
-        all_chaos_combs = fallback_tensor # all_combs[all_chaos_mask] if chaos_exists else fallback_tensor
-        all_chaos_targets = fallback_tensor # all_targets[all_chaos_mask] if chaos_exists else fallback_tensor
-        all_chaos_factors = fallback_tensor # all_factors[all_chaos_mask] if chaos_exists else fallback_tensor
+        all_chaos_combs = fallback_tensor
+        all_chaos_targets = fallback_tensor
+        all_chaos_factors = fallback_tensor
         if chaos_exists:
             all_chaos_mask = torch.logical_or(*[sum(all_combs[:, i]==c_i for c_i in chaos_indices) for i in [0, 1]])
             all_chaos_combs = all_combs[all_chaos_mask]

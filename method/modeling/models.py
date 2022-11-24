@@ -2,7 +2,6 @@ import itertools
 
 import pytorch_lightning as pl
 import pandas as pd
-import math
 import torch
 import torch.nn.functional as F
 import torch_geometric.nn
@@ -148,17 +147,17 @@ class PeronaGraphModel(pl.LightningModule):
         # simplify downstream evaluation
         nxt = (nxt * valid_node_mask.to(torch.long)[:, None]) + \
               (enc.detach().clone() * (~valid_node_mask).to(torch.long)[:, None])
-        
+
         enc_norm = torch.linalg.vector_norm(enc, ord=GeneralConfig.vector_norm_ord, dim=-1, keepdim=False)
         nxt_norm = torch.linalg.vector_norm(nxt, ord=GeneralConfig.vector_norm_ord, dim=-1, keepdim=False)
-        
+
         # 3. get indication of anomaly-likeliness        
         chaos_logits = self.detector(enc - nxt).reshape(-1)
 
         # simplify downstream evaluation
         nxt = (nxt * not_chaos_mask.to(torch.long)[:, None]) + \
               (enc.detach().clone() * (~not_chaos_mask).to(torch.long)[:, None])
-        
+
         # 3. decode
         enc_dec = self.decoder(enc)
         nxt_dec = self.decoder(nxt)
@@ -231,8 +230,8 @@ class PeronaGraphModel(pl.LightningModule):
         self.logger.agg_and_log_metrics(result_dict, step=self.current_epoch)
 
     def test_step(self, data, batch_idx):
-        return self.calculate_batch_sores("test", data)    
-    
+        return self.calculate_batch_sores("test", data)
+
     def calculate_batch_sores(self, name, data):
         class_clustering_loss = losses.MultipleLosses(
             [losses.TripletMarginLoss(distance=CosineSimilarity())],
@@ -300,7 +299,7 @@ class PeronaGraphModel(pl.LightningModule):
             f"{name}_nxt_acc": (nxt_cls, data.bm_id),
             f"{name}_nxt_mse": (nxt_dec, data.x)
         }
-        
+
         to_return_dict = {}
         for m_name, m_value in to_log_dict.items():
             log_dict, batch_size = {m_name: m_value}, len(enc)
