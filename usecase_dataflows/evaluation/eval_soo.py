@@ -88,8 +88,8 @@ if __name__ == '__main__':
     ]:
         multiple_experiment: SooExperiment = SooExperiment("scout_multiple",
                                                            experiment_config=ExperimentConfig(
-                                                               percentiles=[10, 50, 90],
-                                                               iterations=[1, 5, 9],
+                                                               percentiles=[10, 30, 50, 70, 90],
+                                                               iterations=[1, 3, 5, 7, 9],
                                                                num_profilings=10)) \
             .set_experiment_name(f"multiple_soo_{opt_name.lower()}") \
             .set_optimization_classes([(opt_class, opt_name)])
